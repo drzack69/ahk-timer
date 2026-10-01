@@ -58,6 +58,52 @@ export function newState() {
   };
 }
 
+const STATUSES = ['draft', 'running', 'paused', 'finished'];
+const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const periods = (list) =>
+  (Array.isArray(list) ? list : [])
+    .filter((p) => p && finite(p.from) != null)
+    .map((p) => ({ from: p.from, to: finite(p.to) }));
+
+/** Coerce stored or imported state into a shape compute() can always handle. */
+export function normalizeState(raw) {
+  const s = raw && typeof raw === 'object' ? raw : {};
+  const out = newState();
+  out.status = STATUSES.includes(s.status) ? s.status : 'draft';
+  out.startedAt = finite(s.startedAt);
+  if (out.startedAt == null) out.status = 'draft';
+  out.finishedAt = finite(s.finishedAt);
+  out.pauses = periods(s.pauses);
+  out.sc = periods(s.sc);
+  out.stints = (Array.isArray(s.stints) ? s.stints : [])
+    .filter((a) => a && finite(a.start) != null)
+    .map((a) => ({
+      start: a.start,
+      end: finite(a.end),
+      driver: Number.isInteger(a.driver) && a.driver >= 0 ? a.driver : 0,
+      planDur: finite(a.planDur),
+    }));
+  const plan = s.plan && typeof s.plan === 'object' ? s.plan : {};
+  for (const [key, v] of Object.entries(plan)) {
+    const n = parseInt(key, 10);
+    if (!(n >= 1) || !v || typeof v !== 'object') continue;
+    const o = {};
+    if (finite(v.dur) != null) o.dur = v.dur;
+    if (finite(v.pit) != null) o.pit = v.pit;
+    if (Number.isInteger(v.driver) && v.driver >= 0) o.driver = v.driver;
+    if (Object.keys(o).length) out.plan[n] = o;
+  }
+  if (out.status === 'draft') {
+    Object.assign(out, { pauses: [], sc: [], stints: [], finishedAt: null });
+  } else {
+    if (!out.stints.length) out.stints.push({ start: 0, end: null, driver: 0, planDur: null });
+    const openPause = out.pauses.some((p) => p.to == null);
+    if (out.status === 'paused' && !openPause) out.status = 'running';
+    if (out.status === 'running' && openPause) out.status = 'paused';
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- clock
 
 export function pausedMs(state, nowWall) {
@@ -142,8 +188,12 @@ export function compute(race, nowWall = Date.now()) {
     const cap = S + sc * (1 - k);
     let end;
     let plannedDur = null;
+    let plannedEnd = null;
     if (active) {
       plannedDur = ov(n).dur ?? cap;
+      // The plan of later stints can't start in the past, but PIT IN keeps showing
+      // the planned moment so an overdue stop is visible.
+      plannedEnd = Math.min(T, a.start + plannedDur);
       end = Math.max(a.start + plannedDur, now);
     } else {
       end = a.end ?? now;
@@ -163,6 +213,7 @@ export function compute(race, nowWall = Date.now()) {
       cap,
       sc,
       plannedDur,
+      plannedEnd,
       planDurAtStart: a.planDur ?? null,
       pitBefore: i === 0 ? 0 : a.start - st.stints[i - 1].end,
       driver,
@@ -184,7 +235,8 @@ export function compute(race, nowWall = Date.now()) {
       t = lastActual.end + (ov(n).pit ?? P);
       if (inPit) t = Math.max(t, now);
     }
-    for (let guard = 0; guard < 500; guard++, n++) {
+    const maxRows = Math.ceil(T / 60) + 2;
+    for (let guard = 0; guard < maxRows; guard++, n++) {
       const prev = rows[rows.length - 1];
       if (guard > 0) t = prev.end + (ov(n).pit ?? P);
       const o = ov(n);
@@ -260,10 +312,10 @@ export function compute(race, nowWall = Date.now()) {
   if (cur && (phase === 'pre' || phase === 'stint')) {
     fuelLeft = cur.cap - (now - cur.start);
     if (!cur.isFinal) {
-      pitIn = cur.end;
-      const byBuffer = cur.end - finalSlack;
+      pitIn = cur.plannedEnd ?? cur.end;
+      const byBuffer = pitIn - finalSlack;
       const byRule = cur.start + (cur.n === 1 ? open1 : 0);
-      pitOpen = Math.max(byBuffer, byRule);
+      pitOpen = Math.min(pitIn, Math.max(byBuffer, byRule));
       pitOpenBy = byBuffer >= byRule ? 'buffer' : 'rule';
     }
   }
@@ -321,7 +373,7 @@ export function actStart(race, nowWall) {
     pauses: [],
     finishedAt: null,
     sc: [],
-    stints: [{ start: 0, end: null, driver: first?.driver ?? 0, planDur: first?.plannedDur ?? null }],
+    stints: [{ start: 0, end: null, driver: first?.driver ?? 0, planDur: first ? first.dur : null }],
   });
 }
 
@@ -352,11 +404,13 @@ export function actPitOut(race, nowWall) {
   const st = race.state;
   const last = st.stints[st.stints.length - 1];
   if (!last || last.end == null) return;
+  const start = Math.max(c.now, last.end);
+  const nx = c.next;
   st.stints.push({
-    start: Math.max(c.now, last.end),
+    start,
     end: null,
-    driver: c.next?.driver ?? (last.driver + 1) % c.D,
-    planDur: c.next?.plannedDur ?? null,
+    driver: nx?.driver ?? (last.driver + 1) % c.D,
+    planDur: nx ? (nx.isFinal ? Math.max(0, c.T - start) : nx.plannedDur) : null,
   });
 }
 
@@ -382,10 +436,31 @@ export function actFinish(race, nowWall, atSec) {
   st.finishedAt = now;
 }
 
-/** Re-align the race clock so that elapsed time equals `elapsedSec` now. */
+/**
+ * Re-align the race clock so that elapsed time equals `elapsedSec` now.
+ * Pit and safety-car events were recorded live at the right wall-clock moments,
+ * so they move with the clock and stint durations stay real. Only the green
+ * flag (stint 1 start) stays at 0.
+ */
 export function actSyncClock(race, nowWall, elapsedSec) {
   const st = race.state;
-  st.startedAt = nowWall - pausedMs(st, nowWall) - elapsedSec * 1000;
+  const current = Math.floor((nowWall - st.startedAt - pausedMs(st, nowWall)) / 1000);
+  const delta = Math.round(elapsedSec) - current;
+  st.startedAt = nowWall - pausedMs(st, nowWall) - Math.round(elapsedSec) * 1000;
+  const shift = (v) => (v == null ? v : Math.max(0, v + delta));
+  st.stints.forEach((a, i) => {
+    if (i > 0) a.start = shift(a.start);
+    a.end = shift(a.end);
+  });
+  st.sc.forEach((p) => {
+    p.from = shift(p.from);
+    p.to = shift(p.to);
+  });
+}
+
+/** Drop every manual override for stint `n`. */
+export function actResetStint(race, n) {
+  if (race.state.plan) delete race.state.plan[n];
 }
 
 /**
@@ -399,6 +474,10 @@ export function validateEdit(race, nowWall, n, patch) {
   const now = raceNow(race, nowWall);
   if (patch.dur != null && !(patch.dur >= 60)) return 'Stint must be at least 1 minute.';
   if (patch.pit != null && !(patch.pit >= 0)) return 'Pit stop can’t be negative.';
+  if (patch.dur != null && (!a || a.end == null)) {
+    const row = compute(race, nowWall).rows.find((r) => r.n === n);
+    if (row && patch.dur > row.cap + 0.5) return `Longer than the fuel range (${Math.round(row.cap / 60)} min).`;
+  }
   if (a) {
     const prev = st.stints[n - 2];
     const nxt = st.stints[n];
@@ -447,7 +526,9 @@ export function raceStats(race) {
   const c = compute(race, Date.now());
   const st = race.state;
   const P = set.pitStopMin * 60;
-  const done = c.rows.filter((r) => r.status !== 'planned');
+  const done = c.rows
+    .filter((r) => r.status !== 'planned')
+    .map((r) => (r.status === 'active' ? { ...r, dur: Math.max(0, c.now - r.start) } : r));
   const pits = [];
   for (let i = 1; i < st.stints.length; i++) {
     pits.push({ after: i, dur: st.stints[i].start - st.stints[i - 1].end, planned: P });

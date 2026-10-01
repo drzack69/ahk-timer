@@ -4,7 +4,7 @@ import { currentUser, logout } from './auth.js';
 import * as store from './store.js';
 import { compute, actFinish } from './engine.js';
 import { icon, logo } from './icons.js';
-import { esc, toast, statusOf } from './ui.js';
+import { esc, toast, statusOf, closeAllModals } from './ui.js';
 import { LoginView } from './views/login.js';
 import { RacesView } from './views/races.js';
 import { SettingsView } from './views/settings.js';
@@ -53,6 +53,7 @@ function render() {
   if (raceId) store.setPref('lastRace', raceId);
   shell = { route, raceId };
 
+  closeAllModals();
   active?.destroy?.();
   active = null;
   app.className = `app${route.bare ? ' bare' : ''}`;
@@ -106,8 +107,16 @@ function crumbHTML(route, raceId) {
   return `<span>Races</span><span class="slash">/</span><b>${esc(race.name)}</b><span class="chip ${st.cls}">${st.label}</span>`;
 }
 
-// Keep the race name / status chip in the top bar current.
-store.subscribe(() => {
+// Keep the race name / status chip in the top bar current; surface storage failures.
+let lastStorageWarning = 0;
+store.subscribe((evt) => {
+  if (evt?.type === 'error') {
+    if (Date.now() - lastStorageWarning > 15000) {
+      lastStorageWarning = Date.now();
+      toast(`${evt.message} Changes are not being saved.`, 'error', 9000);
+    }
+    return;
+  }
   const el = app.querySelector('.crumb');
   if (el && shell.route) {
     const html = crumbHTML(shell.route, shell.raceId);
@@ -124,7 +133,7 @@ setInterval(() => {
     if (r.state.status !== 'running') continue;
     const c = compute(r, Date.now());
     if (c.now >= c.T && !location.hash.endsWith(`${r.id}/monitor`)) {
-      store.silent(r.id, (x) => actFinish(x, Date.now(), c.T));
+      store.mutate(r.id, 'Flag', (x) => actFinish(x, Date.now(), c.T));
     }
   }
 }, 5000);

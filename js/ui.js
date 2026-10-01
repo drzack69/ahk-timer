@@ -97,6 +97,11 @@ document.addEventListener('keydown', (e) => {
 
 export const modalOpen = () => modalStack.length > 0;
 
+/** Close every open dialog (used on navigation so no dialog outlives its screen). */
+export function closeAllModals() {
+  [...modalStack].reverse().forEach((m) => m.close(null));
+}
+
 export function confirmDialog({ title, message, confirm = 'Confirm', danger = false }) {
   return new Promise((resolve) => {
     const m = openModal({

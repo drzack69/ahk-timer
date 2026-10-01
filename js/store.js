@@ -1,7 +1,7 @@
 // Race storage in localStorage, with per-race undo history.
 // Data lives in this browser only; use export/import to move it between devices.
 
-import { newState, normalizeSettings, DEFAULT_SETTINGS } from './engine.js';
+import { newState, normalizeSettings, normalizeState, DEFAULT_SETTINGS } from './engine.js';
 
 const KEY = 'ahk.races.v1';
 const PREFS_KEY = 'ahk.prefs.v1';
@@ -12,13 +12,40 @@ const clone = (v) => JSON.parse(JSON.stringify(v));
 const uid = () =>
   globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
+const ID_RE = /^[\w-]{1,64}$/;
+const finiteOr = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+
+/** Validate a stored or imported race so nothing malformed reaches the views. */
+function normalizeRace(r) {
+  if (!r || typeof r !== 'object') return null;
+  const now = Date.now();
+  const snap = (h) => ({
+    label: String(h.label ?? 'Change').slice(0, 40),
+    at: finiteOr(h.at, now),
+    settings: normalizeSettings(h.settings || {}),
+    state: normalizeState(h.state),
+  });
+  return {
+    id: typeof r.id === 'string' && ID_RE.test(r.id) ? r.id : uid(),
+    name: String(r.name ?? '').trim().slice(0, 80) || 'Race',
+    createdAt: finiteOr(r.createdAt, now),
+    updatedAt: finiteOr(r.updatedAt, now),
+    settings: normalizeSettings(r.settings || {}),
+    state: normalizeState(r.state),
+    history: (Array.isArray(r.history) ? r.history : [])
+      .filter((h) => h && typeof h === 'object')
+      .slice(-HISTORY_LIVE)
+      .map(snap),
+  };
+}
+
 let races = load();
 const subs = new Set();
 
 function load() {
   try {
     const v = JSON.parse(localStorage.getItem(KEY) || '[]');
-    return Array.isArray(v) ? v.filter((r) => r && r.id && r.settings && r.state) : [];
+    return Array.isArray(v) ? v.map(normalizeRace).filter(Boolean) : [];
   } catch {
     return [];
   }
@@ -119,12 +146,14 @@ export function silent(id, fn) {
   persist();
 }
 
-export function undo(id) {
+/** Revert the last step. `fixup(race)` may adjust the restored race before anyone is notified. */
+export function undo(id, fixup) {
   const r = get(id);
   const snap = r?.history?.pop();
   if (!snap) return null;
   r.settings = snap.settings;
   r.state = snap.state;
+  fixup?.(r);
   r.updatedAt = Date.now();
   persist();
   return snap.label;
@@ -142,10 +171,10 @@ export function importJSON(text) {
   const incoming = Array.isArray(data) ? data : data?.races;
   if (!Array.isArray(incoming)) throw new Error('Not an AHK Timer export.');
   let n = 0;
-  for (const r of incoming) {
-    if (!r?.id || !r.settings || !r.state) continue;
-    const item = { ...r, settings: normalizeSettings(r.settings), history: r.history || [] };
-    const i = races.findIndex((x) => x.id === r.id);
+  for (const raw of incoming) {
+    const item = normalizeRace(raw);
+    if (!item) continue;
+    const i = races.findIndex((x) => x.id === item.id);
     if (i >= 0) races[i] = item;
     else races.push(item);
     n++;

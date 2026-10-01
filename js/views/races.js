@@ -21,7 +21,7 @@ export function RacesView({ view, bottom, go }) {
       ? `<button class="btn sm primary" data-act="stats">${icon('stats')} Statistics</button>`
       : `<button class="btn sm${live ? ' primary' : ''}" data-act="open">${icon('monitor')} ${live ? 'Open monitor' : 'Open'}</button>`;
     return `
-      <article class="panel race-card${live ? ' is-live' : ''}" data-id="${r.id}">
+      <article class="panel race-card${live ? ' is-live' : ''}" data-id="${esc(r.id)}">
         <div class="top">
           <span class="chip ${st.cls}">${st.label}</span>
           <span class="muted">${dateLabel(r.createdAt)}</span>
@@ -46,6 +46,20 @@ export function RacesView({ view, bottom, go }) {
       </article>`;
   }
 
+  // One damaged race must never take the whole list down.
+  function safeCard(r) {
+    try {
+      return card(r);
+    } catch {
+      return `<article class="panel race-card" data-id="${esc(r.id)}">
+        <div class="top"><span class="chip crit">Unreadable</span></div>
+        <h3>${esc(r.name)}</h3><p class="muted">This race's data is damaged.</p>
+        <div class="card-actions"><span class="spacer"></span>
+          <button class="btn-icon sm danger" data-act="delete" title="Delete" aria-label="Delete">${icon('trash')}</button></div>
+      </article>`;
+    }
+  }
+
   function render() {
     const races = store.list();
     const live = races.filter((r) => r.state.status === 'running' || r.state.status === 'paused').length;
@@ -64,7 +78,7 @@ export function RacesView({ view, bottom, go }) {
         </div>
         ${
           races.length
-            ? `<div class="race-grid">${races.map(card).join('')}</div>`
+            ? `<div class="race-grid">${races.map(safeCard).join('')}</div>`
             : `<div class="panel empty">
                  <div class="big-ic">${icon('flag')}</div>
                  <h2>No races yet</h2>

@@ -1,7 +1,7 @@
 // Offline support: network first (always fresh when online), cache as fallback
 // so the app still opens at a track with no signal. Bump CACHE when files are
 // added or renamed.
-const CACHE = 'ahk-timer-v1';
+const CACHE = 'ahk-timer-v2';
 const CORE = [
   './',
   './index.html',
@@ -41,7 +41,8 @@ self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      // Other apps on the same github.io origin share this cache list — only touch ours.
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('ahk-timer-') && k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });
@@ -62,7 +63,10 @@ self.addEventListener('fetch', (e) => {
         return res;
       })
       .catch(() =>
-        caches.match(req, { ignoreSearch: true }).then((hit) => hit || (req.mode === 'navigate' ? caches.match('./index.html') : Response.error())),
+        caches
+          .open(CACHE)
+          .then((c) => c.match(req, { ignoreSearch: true }).then((hit) => hit || (req.mode === 'navigate' ? c.match('./index.html') : undefined)))
+          .then((hit) => hit || Response.error()),
       ),
   );
 });

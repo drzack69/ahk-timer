@@ -4,7 +4,7 @@
 import {
   compute, previewPlan, newState, raceNow, wallAt, raceAt,
   actStart, actPause, actResume, actPitIn, actPitOut, actSafetyCar, actFinish,
-  actSyncClock, actEditStint, validateEdit, raceStats,
+  actSyncClock, actEditStint, actResetStint, validateEdit, raceStats, normalizeState,
 } from '../js/engine.js';
 
 const out = typeof print === 'function' ? print : (s) => console.log(s);
@@ -249,6 +249,76 @@ test('stats summarise a finished race', () => {
   near(s.pitAvg / M, 5);
   eq(s.drivers.map((d) => d.stints), [1, 1, 1]);
   near(s.driveTotal / M, 200);
+});
+
+test('an overdue stop keeps PIT IN at the planned moment', () => {
+  const race = newRace();
+  actStart(race, at(0));
+  actEditStint(race, at(0), 1, { dur: 80 * M });
+  const c = compute(race, at(90));
+  eq(c.pitIn / M, 80, 'pit in stays planned');
+  eq(c.pitOpen <= c.pitIn, true, 'window not after pit in');
+  eq(spans(c)[1], [95, 200], 'next stint planned from now');
+});
+
+test('pit window never opens after PIT IN', () => {
+  const c = previewPlan({ ...SIX_HOURS, pitOpenFirstMin: 120 });
+  eq(c.pitOpen <= c.pitIn, true);
+});
+
+test('planned duration recorded at stint start matches the sheet, also for the final stint', () => {
+  const race = newRace();
+  actStart(race, at(0));
+  for (const [i, o] of [[105, 110], [215, 220], [325, 330]]) {
+    actPitIn(race, at(i));
+    actPitOut(race, at(o));
+  }
+  eq(race.state.stints[0].planDur / M, 105);
+  eq(race.state.stints[3].planDur / M, 30);
+});
+
+test('durations longer than the fuel range are rejected', () => {
+  const race = newRace();
+  eq(validateEdit(race, at(0), 3, { dur: 120 * M }) !== null, true);
+  eq(validateEdit(race, at(0), 3, { dur: 105 * M }), null);
+});
+
+test('clock sync keeps live-recorded stints at their real durations', () => {
+  const race = newRace();
+  actStart(race, at(0)); // START pressed 8 s after the real green flag
+  actPitIn(race, at(105));
+  actPitOut(race, at(110));
+  actSyncClock(race, at(120), 120 * M + 8);
+  const c = compute(race, at(120));
+  eq(c.now, 120 * M + 8);
+  eq(race.state.stints[0].end, 105 * M + 8, 'stint 1 really lasted 105:08');
+  eq(race.state.stints[1].start, 110 * M + 8);
+  eq(c.stintElapsed, 10 * M, 'current stint unchanged');
+});
+
+test('reset drops every override of a stint', () => {
+  const race = newRace();
+  actEditStint(race, at(0), 2, { dur: 60 * M, driver: 2 });
+  actResetStint(race, 2);
+  eq(race.state.plan[2], undefined);
+});
+
+test('live stats count the stint on track by time driven', () => {
+  const race = newRace();
+  actStart(race, at(0));
+  const s = raceStats({ ...race, state: { ...race.state, startedAt: Date.now() - 10 * 60_000 } });
+  near(s.driveTotal / M, 10, '', 0.05);
+});
+
+test('malformed state is normalised instead of breaking compute', () => {
+  const st = normalizeState({ status: 'running', startedAt: 'x', stints: 'nope', plan: { a: 1, 2: { dur: 'x', pit: 60 } } });
+  eq(st.status, 'draft');
+  eq(st.stints, []);
+  const st2 = normalizeState({ status: 'paused', startedAt: 5, pauses: [], plan: { 2: { dur: 'x', pit: 60 } } });
+  eq(st2.status, 'running', 'paused without an open pause');
+  eq(st2.stints.length, 1, 'started race gets stint 1');
+  eq(st2.plan, { 2: { pit: 60 } });
+  compute({ settings: SIX_HOURS, state: st2 }, Date.now());
 });
 
 out(`\n${passed} passed, ${failures.length} failed`);

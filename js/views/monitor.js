@@ -4,7 +4,7 @@
 import * as store from '../store.js';
 import {
   compute, wallAt, raceAt, actStart, actPause, actResume, actPitIn, actPitOut,
-  actSafetyCar, actFinish, actSyncClock, actEditStint, validateEdit,
+  actSafetyCar, actFinish, actSyncClock, actEditStint, actResetStint, validateEdit,
 } from '../engine.js';
 import { icon } from '../icons.js';
 import { esc, digits, setHTML, setText, openModal, confirmDialog, toast } from '../ui.js';
@@ -19,6 +19,9 @@ export function MonitorView({ view, bottom, raceId, go }) {
   let timeMode = store.prefs().timeMode === 'race' ? 'race' : 'clock';
   let lastActive = null;
   let wakeLock = null;
+  let wakePending = false;
+  let destroyed = false;
+  const lastAct = {};
 
   view.innerHTML = `
     <div class="monitor">
@@ -88,24 +91,30 @@ export function MonitorView({ view, bottom, raceId, go }) {
     const sod = parseTimeOfDay(str);
     if (Number.isNaN(sod)) return NaN;
     const refWall = wallAt(race, refSec, nowWall);
-    const day = new Date(refWall);
-    day.setHours(0, 0, 0, 0);
-    const candidates = [-1, 0, 1].map((k) => day.getTime() + k * 86400000 + sod * 1000);
+    const ref = new Date(refWall);
+    const [h, mi, s] = [Math.floor(sod / 3600), Math.floor(sod / 60) % 60, sod % 60];
+    // Build each candidate from calendar fields so daylight-saving days stay correct.
+    const candidates = [-1, 0, 1].map((k) => new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() + k, h, mi, s).getTime());
     const best = candidates.reduce((a, b) => (Math.abs(b - refWall) < Math.abs(a - refWall) ? b : a));
     return raceAt(race, best, nowWall);
   }
 
   async function keepAwake(on) {
+    if (wakePending) return;
+    wakePending = true;
     try {
-      if (on && !wakeLock && 'wakeLock' in navigator && document.visibilityState === 'visible') {
+      if (on && !destroyed && !wakeLock && 'wakeLock' in navigator && document.visibilityState === 'visible') {
         wakeLock = await navigator.wakeLock.request('screen');
         wakeLock.addEventListener('release', () => (wakeLock = null));
+        if (destroyed) await wakeLock.release();
       } else if (!on && wakeLock) {
         await wakeLock.release();
         wakeLock = null;
       }
     } catch {
       /* wake lock is best effort */
+    } finally {
+      wakePending = false;
     }
   }
 
@@ -312,12 +321,13 @@ export function MonitorView({ view, bottom, raceId, go }) {
   // ---------------------------------------------------------------- tick
 
   function tick() {
+    if (destroyed) return;
     race = store.get(id);
     if (!race) return go('#/races');
     const nowWall = Date.now();
     let c = compute(race, nowWall);
     if (c.started && !c.finished && !c.paused && c.now >= c.T) {
-      store.silent(id, (r) => actFinish(r, nowWall, c.T));
+      store.mutate(id, 'Flag', (r) => actFinish(r, nowWall, c.T));
       race = store.get(id);
       c = compute(race, nowWall);
       toast('Chequered flag — race finished', 'ok', 4000);
@@ -335,7 +345,15 @@ export function MonitorView({ view, bottom, raceId, go }) {
 
   function doAction(act) {
     const nowWall = Date.now();
+    if (['primary', 'pitin', 'pitout', 'sc', 'pause'].includes(act)) {
+      if (nowWall - (lastAct[act] || 0) < 700) return; // accidental double tap
+      lastAct[act] = nowWall;
+    }
     const c = compute(race, nowWall);
+    if (c.started && !c.finished && !c.paused && c.now >= c.T && act !== 'undo' && act !== 'close') {
+      tick(); // the flag has fallen — record the finish first
+      return;
+    }
     switch (act) {
       case 'pitin': {
         if (c.phase !== 'stint') return;
@@ -349,7 +367,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
         if (c.phase !== 'pit') return;
         run('Pit out', actPitOut);
         const c2 = compute(store.get(id), Date.now());
-        toast(`Stint ${c2.cur.n} · ${driverName(c2, c2.cur.driver)} · stop ${mmss(c.pitElapsed)}`);
+        if (c2.cur) toast(`Stint ${c2.cur.n} · ${driverName(c2, c2.cur.driver)} · stop ${mmss(c.pitElapsed)}`);
         return;
       }
       case 'sc': {
@@ -385,8 +403,16 @@ export function MonitorView({ view, bottom, raceId, go }) {
           });
         return;
       case 'undo': {
-        const label = store.undo(id);
-        if (label) toast(`Undone: ${label}`);
+        let held = false;
+        const label = store.undo(id, (r) => {
+          // A restored clock that is already past the flag is held instead of finishing again.
+          const cc = compute(r, Date.now());
+          if (cc.started && !cc.finished && !cc.paused && cc.now >= cc.T) {
+            actPause(r, Date.now());
+            held = true;
+          }
+        });
+        if (label) toast(held ? `Undone: ${label} · clock held at the flag — adjust it to continue` : `Undone: ${label}`, 'info', held ? 5000 : 2600);
         tick();
         return;
       }
@@ -454,7 +480,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
       <div class="impact" data-impact></div>
       <div class="form-error" data-err role="alert"></div>`;
 
-    const hasOverride = !!race.state.plan?.[n] && kind !== 'done';
+    const hasOverride = kind !== 'done' && !!race.state.plan?.[n];
     const m = openModal({
       title: `Stint #${n}${kind === 'active' ? ' · on track' : kind === 'done' ? ' · completed' : ''}`,
       body,
@@ -469,12 +495,13 @@ export function MonitorView({ view, bottom, raceId, go }) {
     function patch() {
       const p = {};
       if (touched.has('driver')) p.driver = d.driver;
+      const toFlag = r.isFinal && d.dur >= r.dur - 0.5; // still runs to the flag → keep it automatic
       if (kind === 'planned') {
-        if (touched.has('dur')) p.dur = d.auto ? null : d.dur;
+        if (touched.has('dur')) p.dur = d.auto || toFlag ? null : d.dur;
         if (touched.has('start') || touched.has('pit')) p.pit = d.pit;
       } else if (kind === 'active') {
         if (touched.has('start')) p.start = d.start;
-        if (touched.has('dur')) p.dur = d.auto ? null : d.dur;
+        if (touched.has('dur')) p.dur = d.auto || toFlag ? null : d.dur;
       } else {
         if (touched.has('start')) p.start = d.start;
         if (touched.has('dur') || touched.has('start')) p.end = d.start + d.dur;
@@ -522,9 +549,10 @@ export function MonitorView({ view, bottom, raceId, go }) {
         const s = parseT(c, v, r.start, nowW);
         ok = Number.isFinite(s);
         if (ok) {
+          const end = d.start + d.dur;
           d.start = s;
           if (kind === 'planned') d.pit = prev ? s - prev.end : 0;
-          if (kind === 'done') d.dur = r.end - s;
+          if (kind === 'done') d.dur = end - s; // keep the (possibly edited) pit-in
           touched.add('start');
         }
       } else if (k === 'pit') {
@@ -579,7 +607,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
         return;
       }
       if (e.target.closest('[data-reset]')) {
-        store.mutate(id, `Reset stint ${n}`, (x) => actEditStint(x, Date.now(), n, { dur: null, pit: null, driver: null }));
+        store.mutate(id, `Reset stint ${n}`, (x) => actResetStint(x, n));
         m.close();
         tick();
         return;
@@ -673,12 +701,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
           }
           target = cc.T - left;
         }
-        const lastEvent = Math.max(0, ...race.state.stints.flatMap((s) => [s.start, s.end ?? 0]), ...race.state.sc.flatMap((p) => [p.from, p.to ?? 0]));
-        if (target < lastEvent) {
-          el.querySelector('[data-err]').textContent = 'That would put the clock before the last recorded pit event.';
-          return;
-        }
-        store.mutate(id, 'Clock sync', (r) => actSyncClock(r, nowW, Math.min(cc.T, target)));
+        store.mutate(id, 'Clock sync', (r) => actSyncClock(r, nowW, Math.min(cc.T, Math.max(0, target))));
         m.close();
         tick();
         toast('Race clock adjusted');
@@ -714,6 +737,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
 
   return {
     destroy() {
+      destroyed = true;
       clearInterval(timer);
       unsub();
       document.removeEventListener('visibilitychange', onVisible);
