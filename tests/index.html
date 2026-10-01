@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Engine tests</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; padding: 24px 16px; background: #0b0b0c; color: #f5f5f6; font: 14px/1.5 ui-monospace, Menlo, monospace; }
+    pre { white-space: pre-wrap; }
+    .fail { color: #ff8a82; }
+  </style>
+</head>
+<body>
+  <pre id="out"></pre>
+  <script type="module">
+    const out = document.getElementById('out');
+    globalThis.print = (s) => {
+      const line = document.createElement('div');
+      line.textContent = s;
+      if (/FAIL/.test(s)) line.className = 'fail';
+      out.appendChild(line);
+    };
+    import('./engine.test.mjs').catch((e) => print(`FAIL ${e.message}`));
+  </script>
+</body>
+</html>

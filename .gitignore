@@ -1,0 +1,6 @@
+.DS_Store
+.claude/
+
+# Design references — not part of the published site
+*.jpeg
+logo.png
