@@ -1,15 +1,17 @@
 import { login } from '../auth.js';
+import * as store from '../store.js';
 import { icon, logo } from '../icons.js';
 
 export function LoginView({ view, go }) {
+  const team = store.mode() === 'cloud';
   view.innerHTML = `
     <div class="login">
       <div class="login-card">
         ${logo()}
-        <p class="tagline">Endurance stint control</p>
+        <p class="tagline">Endurance stint control${team ? ' · team sync' : ''}</p>
         <form novalidate>
           <label class="field">
-            <span class="field-label">Username</span>
+            <span class="field-label">${team ? 'Username or email' : 'Username'}</span>
             <span class="input-icon">${icon('user')}
               <input class="input" name="u" autocomplete="username" autocapitalize="none" spellcheck="false" required>
             </span>
@@ -32,11 +34,12 @@ export function LoginView({ view, go }) {
     e.preventDefault();
     const btn = form.querySelector('button');
     btn.disabled = true;
-    const ok = await login(form.u.value, form.p.value);
+    err.textContent = '';
+    const res = await login(form.u.value, form.p.value);
     btn.disabled = false;
-    if (ok) go('#/races');
+    if (res.ok) go('#/races');
     else {
-      err.textContent = 'Wrong username or password.';
+      err.textContent = res.error || 'Wrong username or password.';
       form.p.select();
     }
   });

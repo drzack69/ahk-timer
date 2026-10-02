@@ -86,101 +86,114 @@ function driverBars(drivers) {
 }
 
 export function StatsView({ view, bottom, raceId, go }) {
-  const race = store.get(raceId);
-  const s = raceStats(race);
-  const c = s.c;
-  const st = statusOf(race);
-  const started = race.state.startedAt != null;
-  const timeMode = store.prefs().timeMode === 'race' ? 'race' : 'clock';
-  const t = (sec) => (timeMode === 'clock' && started ? clock(wallAt(race, sec, Date.now())) : raceRel(sec));
-  const name = (i) => s.settings.driverNames[i] ?? `Driver ${i + 1}`;
+  const release = store.open(raceId); // full event log for exact numbers
+  let lastHTML = '';
 
-  const kpis = [
-    ['Race time', hms(c.now), race.state.status === 'finished' ? `of ${hoursLabel(s.settings.raceLengthMin)}` : 'so far'],
-    ['Stints', String(s.stints.length), `${s.baseline.stintCount} planned before start`],
-    ['Pit stops', String(s.pits.length), s.pits.length ? `avg ${mins(s.pitAvg)} · best ${mins(s.pitMin)}` : '—'],
-    ['Time in pits', mins(s.pitTotal), `planned ≈${mins(s.settings.pitStopMin * 60)} per stop`],
-    ['Safety car', mins(s.scTotal), `${s.scCount} period${s.scCount === 1 ? '' : 's'}`],
-    ['Buffer', `${mins(s.baseline.finalSlack)} → ${mins(c.finalSlack)}`, 'planned → unused at the flag'],
-  ];
+  function render() {
+    const race = store.get(raceId);
+    if (!race) return go('#/races');
+    const s = raceStats(race);
+    const c = s.c;
+    const st = statusOf(race);
+    const started = race.state.startedAt != null;
+    const timeMode = store.prefs().timeMode === 'race' ? 'race' : 'clock';
+    const t = (sec) => (timeMode === 'clock' && started ? clock(wallAt(race, sec, Date.now())) : raceRel(sec));
+    const name = (i) => s.settings.driverNames[i] ?? `Driver ${i + 1}`;
 
-  const stintItems = s.stints.map((r) => ({
-    label: `S${r.n}`,
-    value: r.dur,
-    plan: r.planDurAtStart,
-    tip: `Stint ${r.n} · ${name(r.driver)} · ${mins(r.dur)}${r.planDurAtStart ? ` (planned ${mins(r.planDurAtStart)})` : ''}`,
-  }));
-  const pitItems = s.pits.map((p) => ({ label: `P${p.after}`, value: p.dur, tip: `Pit stop ${p.after} · ${mins(p.dur)}` }));
+    const kpis = [
+      ['Race time', hms(c.now), race.state.status === 'finished' ? `of ${hoursLabel(s.settings.raceLengthMin)}` : 'so far'],
+      ['Stints', String(s.stints.length), `${s.baseline.stintCount} planned before start`],
+      ['Pit stops', String(s.pits.length), s.pits.length ? `avg ${mins(s.pitAvg)} · best ${mins(s.pitMin)}` : '—'],
+      ['Time in pits', mins(s.pitTotal), `planned ≈${mins(s.settings.pitStopMin * 60)} per stop`],
+      ['Safety car', mins(s.scTotal), `${s.scCount} period${s.scCount === 1 ? '' : 's'}`],
+      ['Buffer', `${mins(s.baseline.finalSlack)} → ${mins(c.finalSlack)}`, 'planned → unused at the flag'],
+    ];
 
-  const log = s.stints
-    .map((r, i) => {
-      const pit = s.pits[i];
-      const delta = r.planDurAtStart != null ? r.dur - r.planDurAtStart : null;
-      return `<tr>
-        <td>${r.n}</td>
-        <td>${esc(name(r.driver))}</td>
-        <td>${t(r.start)}</td>
-        <td>${t(r.end)}</td>
-        <td class="r">${mins(r.dur)}</td>
-        <td class="r">${r.planDurAtStart != null ? mins(r.planDurAtStart) : '—'}</td>
-        <td class="r">${delta == null ? '—' : `${delta >= 0 ? '+' : '−'}${mins(Math.abs(delta))}`}</td>
-        <td class="r">${r.sc > 1 ? mins(r.sc) : '—'}</td>
-        <td class="r">${pit ? mins(pit.dur) : '—'}</td>
-      </tr>`;
-    })
-    .join('');
+    const stintItems = s.stints.map((r) => ({
+      label: `S${r.n}`,
+      value: r.dur,
+      plan: r.planDurAtStart,
+      tip: `Stint ${r.n} · ${name(r.driver)} · ${mins(r.dur)}${r.planDurAtStart ? ` (planned ${mins(r.planDurAtStart)})` : ''}`,
+    }));
+    const pitItems = s.pits.map((p) => ({ label: `P${p.after}`, value: p.dur, tip: `Pit stop ${p.after} · ${mins(p.dur)}` }));
 
-  view.innerHTML = `
-    <div class="page">
-      <div class="page-head">
-        <div>
-          <div class="stats-head"><h1>${esc(race.name)}</h1><span class="chip ${st.cls}">${st.label}</span></div>
-          <p>${dateLabel(race.state.startedAt || race.createdAt)} · ${hoursLabel(s.settings.raceLengthMin)} · ${s.settings.maxStintMin}′ max stint · ${s.settings.drivers} drivers</p>
-        </div>
-      </div>
-      ${!started ? '<div class="panel empty"><h2>No data yet</h2><p>Statistics appear once the race has started.</p></div>' : `
-      <div class="kpis">${kpis
-        .map(([l, v, d]) => `<div class="panel kpi"><div class="lbl">${l}</div><div class="v">${v}</div><div class="d">${d}</div></div>`)
-        .join('')}</div>
-      <div class="stats-grid">
-        <section class="panel chart-card wide">
-          <div class="chart-head"><div><h3>Race timeline</h3><p class="sub">Stints, pit stops and safety-car periods</p></div>
-            <div class="legend"><span><i class="sw"></i>Stint</span><span><i class="sw sc"></i>Safety car</span></div></div>
-          ${timelineHTML(c, { sc: race.state.sc, head: race.state.status === 'finished' ? null : c.now })}
-        </section>
-        <section class="panel chart-card">
-          <div class="chart-head"><div><h3>Stint durations</h3><p class="sub">Actual time on track per stint</p></div>
-            <div class="legend"><span><i class="sw"></i>Actual</span><span><i class="sw plan"></i>Planned at start</span></div></div>
-          ${columnChart({ items: stintItems, ref: s.settings.maxStintMin * 60, refLabel: `Max ${s.settings.maxStintMin}′` })}
-        </section>
-        <section class="panel chart-card">
-          <div class="chart-head"><div><h3>Pit stops</h3><p class="sub">Time from pit in to pit out</p></div></div>
-          ${columnChart({ items: pitItems, ref: s.settings.pitStopMin * 60, refLabel: `Planned ${mins(s.settings.pitStopMin * 60)}` })}
-        </section>
-        <section class="panel chart-card">
-          <div class="chart-head"><div><h3>Driving time</h3><p class="sub">Total time on track per driver</p></div></div>
-          ${driverBars(s.drivers)}
-        </section>
-        <section class="panel chart-card">
-          <div class="chart-head"><div><h3>Summary</h3><p class="sub">Strategy against the plan</p></div></div>
-          <div class="impact" style="margin-top:0">
-            <div class="row"><span>Total driving time</span><b>${hms(s.driveTotal)}</b></div>
-            <div class="row"><span>Average stint</span><b>${s.stints.length ? mins(s.driveTotal / s.stints.length) : '—'}</b></div>
-            <div class="row"><span>Longest stint</span><b>${s.stints.length ? mins(Math.max(...s.stints.map((r) => r.dur))) : '—'}</b></div>
-            <div class="row"><span>Slowest pit stop</span><b>${s.pits.length ? mins(s.pitMax) : '—'}</b></div>
-            <div class="row"><span>Stops vs plan</span><b>${s.pits.length} / ${Math.max(0, s.baseline.stintCount - 1)}</b></div>
-            <div class="row"><span>Safety-car range gained</span><b>${mins(s.scTotal * (1 - s.settings.scFactor))}</b></div>
+    const log = s.stints
+      .map((r, i) => {
+        const pit = s.pits[i];
+        const delta = r.planDurAtStart != null ? r.dur - r.planDurAtStart : null;
+        return `<tr>
+          <td>${r.n}</td>
+          <td>${esc(name(r.driver))}</td>
+          <td>${t(r.start)}</td>
+          <td>${t(r.end)}</td>
+          <td class="r">${mins(r.dur)}</td>
+          <td class="r">${r.planDurAtStart != null ? mins(r.planDurAtStart) : '—'}</td>
+          <td class="r">${delta == null ? '—' : `${delta >= 0 ? '+' : '−'}${mins(Math.abs(delta))}`}</td>
+          <td class="r">${r.sc > 1 ? mins(r.sc) : '—'}</td>
+          <td class="r">${pit ? mins(pit.dur) : '—'}</td>
+        </tr>`;
+      })
+      .join('');
+
+    const html = `
+      <div class="page">
+        <div class="page-head">
+          <div>
+            <div class="stats-head"><h1>${esc(race.name)}</h1><span class="chip ${st.cls}">${st.label}</span></div>
+            <p>${dateLabel(race.state.startedAt || race.createdAt)} · ${hoursLabel(s.settings.raceLengthMin)} · ${s.settings.maxStintMin}′ max stint · ${s.settings.drivers} drivers</p>
           </div>
-        </section>
-        <section class="panel chart-card wide">
-          <div class="chart-head"><div><h3>Stint log</h3><p class="sub">Every stint as recorded${timeMode === 'clock' ? ' · clock times' : ' · race time'}</p></div></div>
-          <div class="table-scroll"><table class="log">
-            <thead><tr><th>#</th><th>Driver</th><th>Start</th><th>End</th><th class="r">Duration</th><th class="r">Planned</th><th class="r">Δ plan</th><th class="r">SC</th><th class="r">Pit after</th></tr></thead>
-            <tbody>${log}</tbody>
-          </table></div>
-        </section>
-      </div>`}
-    </div>`;
+        </div>
+        ${!started ? '<div class="panel empty"><h2>No data yet</h2><p>Statistics appear once the race has started.</p></div>' : `
+        <div class="kpis">${kpis
+          .map(([l, v, d]) => `<div class="panel kpi"><div class="lbl">${l}</div><div class="v">${v}</div><div class="d">${d}</div></div>`)
+          .join('')}</div>
+        <div class="stats-grid">
+          <section class="panel chart-card wide">
+            <div class="chart-head"><div><h3>Race timeline</h3><p class="sub">Stints, pit stops and safety-car periods</p></div>
+              <div class="legend"><span><i class="sw"></i>Stint</span><span><i class="sw sc"></i>Safety car</span></div></div>
+            ${timelineHTML(c, { sc: race.state.sc, head: race.state.status === 'finished' ? null : c.now })}
+          </section>
+          <section class="panel chart-card">
+            <div class="chart-head"><div><h3>Stint durations</h3><p class="sub">Actual time on track per stint</p></div>
+              <div class="legend"><span><i class="sw"></i>Actual</span><span><i class="sw plan"></i>Planned at start</span></div></div>
+            ${columnChart({ items: stintItems, ref: s.settings.maxStintMin * 60, refLabel: `Max ${s.settings.maxStintMin}′` })}
+          </section>
+          <section class="panel chart-card">
+            <div class="chart-head"><div><h3>Pit stops</h3><p class="sub">Time from pit in to pit out</p></div></div>
+            ${columnChart({ items: pitItems, ref: s.settings.pitStopMin * 60, refLabel: `Planned ${mins(s.settings.pitStopMin * 60)}` })}
+          </section>
+          <section class="panel chart-card">
+            <div class="chart-head"><div><h3>Driving time</h3><p class="sub">Total time on track per driver</p></div></div>
+            ${driverBars(s.drivers)}
+          </section>
+          <section class="panel chart-card">
+            <div class="chart-head"><div><h3>Summary</h3><p class="sub">Strategy against the plan</p></div></div>
+            <div class="impact" style="margin-top:0">
+              <div class="row"><span>Total driving time</span><b>${hms(s.driveTotal)}</b></div>
+              <div class="row"><span>Average stint</span><b>${s.stints.length ? mins(s.driveTotal / s.stints.length) : '—'}</b></div>
+              <div class="row"><span>Longest stint</span><b>${s.stints.length ? mins(Math.max(...s.stints.map((r) => r.dur))) : '—'}</b></div>
+              <div class="row"><span>Slowest pit stop</span><b>${s.pits.length ? mins(s.pitMax) : '—'}</b></div>
+              <div class="row"><span>Stops vs plan</span><b>${s.pits.length} / ${Math.max(0, s.baseline.stintCount - 1)}</b></div>
+              <div class="row"><span>Safety-car range gained</span><b>${mins(s.scTotal * (1 - s.settings.scFactor))}</b></div>
+            </div>
+          </section>
+          <section class="panel chart-card wide">
+            <div class="chart-head"><div><h3>Stint log</h3><p class="sub">Every stint as recorded${timeMode === 'clock' ? ' · clock times' : ' · race time'}</p></div></div>
+            <div class="table-scroll"><table class="log">
+              <thead><tr><th>#</th><th>Driver</th><th>Start</th><th>End</th><th class="r">Duration</th><th class="r">Planned</th><th class="r">Δ plan</th><th class="r">SC</th><th class="r">Pit after</th></tr></thead>
+              <tbody>${log}</tbody>
+            </table></div>
+          </section>
+        </div>`}
+      </div>`;
+    if (html !== lastHTML) {
+      const y = view.scrollTop;
+      view.innerHTML = lastHTML = html;
+      view.scrollTop = y;
+    }
+  }
+  render();
+  const unsub = store.subscribe((evt) => evt?.type === 'change' && render());
 
   bottom.innerHTML = `
     <button class="btn-icon" data-act="back" title="Back to races" aria-label="Back to races">${icon('chevronLeft')}</button>
@@ -217,6 +230,8 @@ export function StatsView({ view, bottom, raceId, go }) {
 
   return {
     destroy() {
+      release();
+      unsub();
       tip.remove();
     },
   };

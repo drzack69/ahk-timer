@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// Firestore security rules for AHK Timer.
+// Paste into Firebase console → Firestore Database → Rules, then Publish.
+//
+// Only the accounts listed in teamEmails() can read or change races. Add every
+// login you create in Authentication → Users. Short usernames use the domain
+// from config.js, so "pepa" is pepa@ahk-timer.app.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function teamEmails() {
+      return [
+        'team@ahk-timer.app'
+      ];
+    }
+
+    function isTeam() {
+      return request.auth != null && request.auth.token.email in teamEmails();
+    }
+
+    match /races/{raceId} {
+      allow read, create, update, delete: if isTeam();
+
+      // Race events are append-only: added, or deleted with their race, never edited.
+      match /ops/{opId} {
+        allow read, create, delete: if isTeam();
+        allow update: if false;
+      }
+    }
+  }
+}

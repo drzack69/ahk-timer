@@ -1,6 +1,7 @@
 // Small DOM helpers: escaping, digit rendering, modal, confirm, prompt, toast.
 
 import { icon } from './icons.js';
+import { compute } from './engine.js';
 
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
@@ -19,16 +20,11 @@ export function digits(str) {
 }
 
 export function statusOf(race) {
-  switch (race.state.status) {
-    case 'running':
-      return { label: 'Live', cls: 'live' };
-    case 'paused':
-      return { label: 'Paused', cls: 'sc' };
-    case 'finished':
-      return { label: 'Finished', cls: 'done' };
-    default:
-      return { label: 'Draft', cls: 'ghost' };
-  }
+  const c = compute(race, Date.now()); // includes the finish at the flag
+  if (c.finished) return { label: 'Finished', cls: 'done' };
+  if (c.paused) return { label: 'Paused', cls: 'sc' };
+  if (c.started) return { label: 'Live', cls: 'live' };
+  return { label: 'Draft', cls: 'ghost' };
 }
 
 /** Set innerHTML only when it changed (keeps hover/focus and avoids layout work). */

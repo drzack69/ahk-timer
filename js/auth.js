@@ -1,25 +1,7 @@
-import { USERS } from '../config.js';
-import { sha256 } from './sha256.js';
+// Sign-in goes through the store's adapter: local accounts from config.js, or
+// Firebase Authentication when team sync is configured.
+import * as store from './store.js';
 
-const KEY = 'ahk.session.v1';
-
-export function currentUser() {
-  try {
-    return JSON.parse(localStorage.getItem(KEY) || 'null')?.username ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export async function login(username, password) {
-  const name = String(username || '').trim().toLowerCase();
-  const user = USERS.find((u) => u.username.toLowerCase() === name);
-  const hash = await sha256(String(password || ''));
-  if (!user || hash !== String(user.passwordSha256).toLowerCase()) return false;
-  localStorage.setItem(KEY, JSON.stringify({ username: user.username, at: Date.now() }));
-  return true;
-}
-
-export function logout() {
-  localStorage.removeItem(KEY);
-}
+export const currentUser = () => store.user();
+export const login = (username, password) => store.signIn(username, password);
+export const logout = () => store.signOut();

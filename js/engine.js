@@ -163,6 +163,17 @@ function overlap(periods, a, b, now) {
  * stints until the flag, plus buffer and pit-window figures.
  */
 export function compute(race, nowWall = Date.now()) {
+  // A running race whose clock has reached the flag is finished. This is derived
+  // here rather than stored, so no device has to record it, it can't be recorded
+  // twice, and correcting the clock (sync) simply brings the race back.
+  if (race.state.status === 'running' && race.state.startedAt != null) {
+    const T0 = normalizeSettings(race.settings).raceLengthMin * 60;
+    if ((nowWall - race.state.startedAt - pausedMs(race.state, nowWall)) / 1000 >= T0) {
+      const done = { ...race, state: JSON.parse(JSON.stringify(race.state)) };
+      actFinish(done, nowWall, T0);
+      return { ...compute(done, nowWall), autoFinished: true };
+    }
+  }
   const set = normalizeSettings(race.settings);
   const st = race.state;
   const T = set.raceLengthMin * 60;
@@ -361,9 +372,14 @@ export function previewPlan(settings) {
 }
 
 // ---------------------------------------------------------------- actions
-// Each mutates race.state in place; the store snapshots before calling.
+// Each mutates race.state in place. Actions are replayed on every device, so an
+// action that doesn't fit the current state (pit out while on track, start
+// twice …) does nothing instead of corrupting the race.
+
+const live = (st) => st.status === 'running' || st.status === 'paused';
 
 export function actStart(race, nowWall) {
+  if (race.state.status !== 'draft') return;
   const c = compute(race, nowWall);
   const st = race.state;
   const first = c.rows[0];
@@ -393,6 +409,7 @@ export function actResume(race, nowWall) {
 }
 
 export function actPitIn(race, nowWall) {
+  if (!live(race.state)) return;
   const now = raceNow(race, nowWall);
   const a = race.state.stints[race.state.stints.length - 1];
   if (!a || a.end != null) return;
@@ -400,6 +417,7 @@ export function actPitIn(race, nowWall) {
 }
 
 export function actPitOut(race, nowWall) {
+  if (!live(race.state)) return;
   const c = compute(race, nowWall);
   const st = race.state;
   const last = st.stints[st.stints.length - 1];
@@ -414,15 +432,19 @@ export function actPitOut(race, nowWall) {
   });
 }
 
-export function actSafetyCar(race, nowWall) {
+/** Safety car in or out. `on` true/false sets it explicitly; omitted it toggles. */
+export function actSafetyCar(race, nowWall, on) {
+  if (!live(race.state)) return;
   const now = raceNow(race, nowWall);
   const open = race.state.sc.find((p) => p.to == null);
-  if (open) open.to = Math.max(open.from, now);
-  else race.state.sc.push({ from: now, to: null });
+  const want = on ?? !open;
+  if (want && !open) race.state.sc.push({ from: now, to: null });
+  if (!want && open) open.to = Math.max(open.from, now);
 }
 
 export function actFinish(race, nowWall, atSec) {
   const st = race.state;
+  if (!live(st)) return;
   const now = atSec ?? raceNow(race, nowWall);
   const a = st.stints[st.stints.length - 1];
   if (a && a.end == null) a.end = Math.max(a.start, now);
@@ -444,6 +466,7 @@ export function actFinish(race, nowWall, atSec) {
  */
 export function actSyncClock(race, nowWall, elapsedSec) {
   const st = race.state;
+  if (!live(st) || !Number.isFinite(elapsedSec)) return;
   const current = Math.floor((nowWall - st.startedAt - pausedMs(st, nowWall)) / 1000);
   const delta = Math.round(elapsedSec) - current;
   st.startedAt = nowWall - pausedMs(st, nowWall) - Math.round(elapsedSec) * 1000;

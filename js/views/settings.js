@@ -38,6 +38,7 @@ function hintFor(key, s) {
 
 export function SettingsView({ view, bottom, raceId, go }) {
   const race = raceId ? store.get(raceId) : null;
+  const release = race ? store.open(race.id) : null; // load its event log so a save can be recorded
   const isNew = !race;
   let s = normalizeSettings(race ? race.settings : DEFAULT_SETTINGS);
   const initial = JSON.stringify({ s, name: race?.name ?? '' });
@@ -197,8 +198,13 @@ export function SettingsView({ view, bottom, raceId, go }) {
       go(`#/race/${r.id}/monitor`);
       return;
     }
-    const c = compute({ ...race, settings }, Date.now());
-    if (c.started && !c.finished && c.now >= c.T) {
+    const latest = store.get(race.id);
+    if (!latest?.synced) {
+      toast('Still syncing this race — try again in a moment.');
+      return;
+    }
+    const c = compute(latest, Date.now());
+    if (c.started && !c.finished && c.now >= settings.raceLengthMin * 60) {
       const ok = await confirmDialog({
         title: 'Race length already reached',
         message: 'The new race length is shorter than the time already elapsed, so the race will finish immediately.',
@@ -206,10 +212,8 @@ export function SettingsView({ view, bottom, raceId, go }) {
       });
       if (!ok) return;
     }
-    store.mutate(race.id, 'Settings', (r) => {
-      r.name = name;
-      r.settings = settings;
-    });
+    store.dispatch(race.id, 'settings', { settings });
+    store.rename(race.id, name);
     toast('Settings saved', 'ok');
     go(`#/race/${race.id}/monitor`);
   }
@@ -231,4 +235,9 @@ export function SettingsView({ view, bottom, raceId, go }) {
   renderPreview();
   markDirty();
   if (isNew) setTimeout(() => nameInput.focus(), 60);
+  return {
+    destroy() {
+      release?.();
+    },
+  };
 }

@@ -1,7 +1,7 @@
 // Offline support: network first (always fresh when online), cache as fallback
 // so the app still opens at a track with no signal. Bump CACHE when files are
 // added or renamed.
-const CACHE = 'ahk-timer-v2';
+const CACHE = 'ahk-timer-v3';
 const CORE = [
   './',
   './index.html',
@@ -13,7 +13,10 @@ const CORE = [
   './assets/icon.svg',
   './js/main.js',
   './js/engine.js',
+  './js/ops.js',
   './js/store.js',
+  './js/sync/local.js',
+  './js/sync/firebase.js',
   './js/auth.js',
   './js/sha256.js',
   './js/format.js',
@@ -51,8 +54,11 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
+  // Same-origin files, Google Fonts and the Firebase SDK are cached for offline
+  // starts. Firestore's own traffic (firestore.googleapis.com) is never touched.
   const font = /(^|\.)fonts\.(googleapis|gstatic)\.com$/.test(url.hostname);
-  if (url.origin !== self.location.origin && !font) return;
+  const sdk = url.hostname === 'www.gstatic.com' && url.pathname.startsWith('/firebasejs/');
+  if (url.origin !== self.location.origin && !font && !sdk) return;
   e.respondWith(
     fetch(req)
       .then((res) => {

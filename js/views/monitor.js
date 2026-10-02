@@ -2,10 +2,7 @@
 // the editable stint sheet, undo, pause and clock sync.
 
 import * as store from '../store.js';
-import {
-  compute, wallAt, raceAt, actStart, actPause, actResume, actPitIn, actPitOut,
-  actSafetyCar, actFinish, actSyncClock, actEditStint, actResetStint, validateEdit,
-} from '../engine.js';
+import { compute, wallAt, raceAt, actEditStint, validateEdit } from '../engine.js';
 import { icon } from '../icons.js';
 import { esc, digits, setHTML, setText, openModal, confirmDialog, toast } from '../ui.js';
 import { hms, mmss, countdown, mins, clock, raceRel, parseDuration, parseTimeOfDay, parseHms } from '../format.js';
@@ -21,7 +18,11 @@ export function MonitorView({ view, bottom, raceId, go }) {
   let wakeLock = null;
   let wakePending = false;
   let destroyed = false;
+  let locked = !!store.prefs().locked; // view-only on this device
+  let finishedBefore = null;
+  let seenOp; // newest event already shown, to announce other devices' events
   const lastAct = {};
+  const release = store.open(id); // load and follow this race's events
 
   view.innerHTML = `
     <div class="monitor">
@@ -73,6 +74,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
     <button class="btn" data-act="undo" data-ref="undo" title="Undo the last change">${icon('undo')}<span class="txt">Undo</span><small class="undo-label" data-ref="undoLabel"></small></button>
     <span class="status-line" data-ref="statusLine"></span>
     <span class="spacer"></span>
+    <button class="btn-icon" data-act="lock" data-ref="lock"></button>
     <button class="btn" data-act="pause" data-ref="pause"></button>
     <button class="btn go" data-act="primary" data-ref="primary"></button>`;
 
@@ -155,6 +157,8 @@ export function MonitorView({ view, bottom, raceId, go }) {
     else if (c.paused) badges.push(`<span class="chip sc">${icon('pause')} Paused</span>`);
     else badges.push('<span class="chip live">Live</span>');
     if (c.scActive) badges.push(`<span class="chip sc">${icon('car')} SC ${mmss(c.scElapsed)}</span>`);
+    if (!race.synced) badges.push('<span class="chip ghost">Syncing…</span>');
+    if (locked) badges.push(`<span class="chip ghost">${icon('lock')} View only</span>`);
     setHTML(ref.badges, badges.join(''));
     const win = (c.phase === 'stint' || c.phase === 'pre') && c.pitOpen != null ? [c.pitOpen, c.pitIn] : null;
     setHTML(ref.tl, timelineHTML(c, { sc: st.sc, head: c.started ? c.now : null, win }));
@@ -254,22 +258,23 @@ export function MonitorView({ view, bottom, raceId, go }) {
     setHTML(ref.p2s, p2[2]);
 
     // action buttons
+    const canAct = race.synced && !locked;
     const onTrack = c.phase === 'stint';
     const finalStint = onTrack && cur?.isFinal;
-    ref.aIn.disabled = !onTrack;
-    ref.aIn.classList.toggle('ready', onTrack && !finalStint);
-    ref.aIn.classList.toggle('urgent', onTrack && !finalStint && c.pitIn != null && c.now >= c.pitIn - 60);
+    ref.aIn.disabled = !onTrack || !canAct;
+    ref.aIn.classList.toggle('ready', onTrack && !finalStint && canAct);
+    ref.aIn.classList.toggle('urgent', onTrack && !finalStint && canAct && c.pitIn != null && c.now >= c.pitIn - 60);
     setText(ref.aInS, !onTrack ? (c.phase === 'pit' ? 'Car in the pit' : 'Ends the stint')
       : finalStint ? 'Final stint'
       : c.now > c.pitIn ? `Box now ${countdown(c.pitIn - c.now)}`
       : `Planned ${t(c.pitIn)}`);
     const canSc = c.started && !c.finished;
-    ref.aSc.disabled = !canSc;
+    ref.aSc.disabled = !canSc || !canAct;
     ref.aSc.classList.toggle('sc-on', c.scActive);
     setText(ref.aScS, c.scActive ? `Out ${mmss(c.scElapsed)} · tap to end` : `Fuel ×${c.k.toFixed(2)} under SC`);
     const inPit = c.phase === 'pit';
-    ref.aOut.disabled = !inPit;
-    ref.aOut.classList.toggle('ready', inPit);
+    ref.aOut.disabled = !inPit || !canAct;
+    ref.aOut.classList.toggle('ready', inPit && canAct);
     setText(ref.aOutS, inPit ? `In pit ${mmss(c.pitElapsed)}` : 'Starts next stint');
 
     // sheet
@@ -295,7 +300,11 @@ export function MonitorView({ view, bottom, raceId, go }) {
 
     // bottom bar
     const undoLabel = store.lastStep(id);
-    ref.undo.disabled = !undoLabel;
+    ref.undo.disabled = !undoLabel || !canAct;
+    setHTML(ref.lock, icon(locked ? 'lock' : 'unlock'));
+    ref.lock.classList.toggle('on', locked);
+    ref.lock.title = locked ? 'View only — tap to unlock the controls on this device' : 'Lock the controls on this device (view only)';
+    ref.lock.setAttribute('aria-label', ref.lock.title);
     setText(ref.undoLabel, undoLabel || '');
     let status = '';
     if (c.phase === 'pre') status = `${c.stintCount} stints planned · buffer ${mins(c.finalSlack)}`;
@@ -304,9 +313,10 @@ export function MonitorView({ view, bottom, raceId, go }) {
     else status = 'Race complete';
     setText(ref.statusLine, status);
     setHTML(ref.pause, c.paused ? `${icon('play')}<span class="txt">Resume</span>` : `${icon('pause')}<span class="txt">Pause</span>`);
-    ref.pause.disabled = !c.started || c.finished;
+    ref.pause.disabled = !c.started || c.finished || !canAct;
     ref.pause.classList.toggle('primary', c.paused);
     ref.primary.className = 'btn go';
+    ref.primary.disabled = !canAct && !c.finished;
     if (!c.started) {
       ref.primary.classList.add('primary');
       setHTML(ref.primary, `${icon('play')} START`);
@@ -325,22 +335,41 @@ export function MonitorView({ view, bottom, raceId, go }) {
     race = store.get(id);
     if (!race) return go('#/races');
     const nowWall = Date.now();
-    let c = compute(race, nowWall);
-    if (c.started && !c.finished && !c.paused && c.now >= c.T) {
-      store.mutate(id, 'Flag', (r) => actFinish(r, nowWall, c.T));
-      race = store.get(id);
-      c = compute(race, nowWall);
-      toast('Chequered flag — race finished', 'ok', 4000);
-    }
+    const c = compute(race, nowWall);
+    if (finishedBefore === false && c.finished) toast('Chequered flag — race finished', 'ok', 4000);
+    finishedBefore = c.finished;
+    announceRemote();
     paint(c, nowWall);
     keepAwake(c.started && !c.finished);
   }
 
+  // Tell this device when someone else records an event.
+  function announceRemote() {
+    if (!race.synced) return;
+    const n = store.newestOp(id);
+    const key = n?.op.id ?? null;
+    if (seenOp === undefined || key === seenOp) {
+      seenOp = key;
+      return;
+    }
+    seenOp = key;
+    if (n && n.op.dev && n.op.dev !== store.device()) toast(`${n.label} · ${n.op.by || 'another device'}`);
+  }
+
   // ---------------------------------------------------------------- actions
 
-  function run(label, fn) {
-    store.mutate(id, label, (r) => fn(r, Date.now()));
+  /** Record an event for this race. */
+  function send(type, args) {
+    if (locked) {
+      toast('Controls are locked on this device — tap the lock to unlock.');
+      return false;
+    }
+    if (!store.dispatch(id, type, args)) {
+      toast('Still syncing this race — try again in a moment.');
+      return false;
+    }
     tick();
+    return true;
   }
 
   function doAction(act) {
@@ -350,22 +379,16 @@ export function MonitorView({ view, bottom, raceId, go }) {
       lastAct[act] = nowWall;
     }
     const c = compute(race, nowWall);
-    if (c.started && !c.finished && !c.paused && c.now >= c.T && act !== 'undo' && act !== 'close') {
-      tick(); // the flag has fallen — record the finish first
-      return;
-    }
     switch (act) {
       case 'pitin': {
-        if (c.phase !== 'stint') return;
-        run('Pit in', actPitIn);
+        if (c.phase !== 'stint' || !send('pitIn')) return;
         const row = compute(store.get(id), Date.now()).rows[c.cur.n - 1];
         const used = row.bufferUsed;
         toast(`Pit in · stint ${row.n}: ${mins(row.dur)}${used > 30 ? ` · used ${mins(used)} buffer` : ''}`);
         return;
       }
       case 'pitout': {
-        if (c.phase !== 'pit') return;
-        run('Pit out', actPitOut);
+        if (c.phase !== 'pit' || !send('pitOut')) return;
         const c2 = compute(store.get(id), Date.now());
         if (c2.cur) toast(`Stint ${c2.cur.n} · ${driverName(c2, c2.cur.driver)} · stop ${mmss(c.pitElapsed)}`);
         return;
@@ -373,23 +396,20 @@ export function MonitorView({ view, bottom, raceId, go }) {
       case 'sc': {
         if (!c.started || c.finished) return;
         const on = !c.scActive;
-        run(on ? 'Safety car out' : 'Safety car in', actSafetyCar);
+        if (!send(on ? 'scOn' : 'scOff')) return;
         toast(on ? 'Safety car deployed — stint range extending' : `Safety car in · ${mmss(c.scElapsed)}`);
         return;
       }
       case 'pause':
         if (c.paused) {
-          run('Resume', actResume);
-          toast('Race clock running');
+          if (send('resume')) toast('Race clock running');
         } else if (c.started && !c.finished) {
-          run('Pause', actPause);
-          toast('Race clock paused');
+          if (send('pause')) toast('Race clock paused');
         }
         return;
       case 'primary':
         if (!c.started) {
-          run('Start', actStart);
-          toast('Green flag — race clock running', 'ok');
+          if (send('start')) toast('Green flag — race clock running', 'ok');
         } else if (c.finished) go(`#/race/${id}/stats`);
         else
           confirmDialog({
@@ -397,25 +417,22 @@ export function MonitorView({ view, bottom, raceId, go }) {
             message: `The race clock stops at <b>${hms(c.now)}</b> and the current stint is closed. You can undo this.`,
             confirm: 'Finish race',
           }).then((ok) => {
-            if (!ok) return;
-            run('Finish', (r, w) => actFinish(r, w));
-            toast('Race finished', 'ok');
+            if (ok && send('finish')) toast('Race finished', 'ok');
           });
         return;
       case 'undo': {
-        let held = false;
-        const label = store.undo(id, (r) => {
-          // A restored clock that is already past the flag is held instead of finishing again.
-          const cc = compute(r, Date.now());
-          if (cc.started && !cc.finished && !cc.paused && cc.now >= cc.T) {
-            actPause(r, Date.now());
-            held = true;
-          }
-        });
-        if (label) toast(held ? `Undone: ${label} · clock held at the flag — adjust it to continue` : `Undone: ${label}`, 'info', held ? 5000 : 2600);
+        if (locked) return send('undo'); // shows the lock hint
+        const label = store.undo(id);
+        if (label) toast(`Undone: ${label}`);
         tick();
         return;
       }
+      case 'lock':
+        locked = !locked;
+        store.setPref('locked', locked);
+        toast(locked ? 'View only — controls locked on this device' : 'Controls unlocked on this device');
+        tick();
+        return;
       case 'close':
         go('#/races');
     }
@@ -607,9 +624,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
         return;
       }
       if (e.target.closest('[data-reset]')) {
-        store.mutate(id, `Reset stint ${n}`, (x) => actResetStint(x, n));
-        m.close();
-        tick();
+        if (send('reset', { n })) m.close();
         return;
       }
       if (e.target.closest('[data-apply]')) apply();
@@ -626,9 +641,8 @@ export function MonitorView({ view, bottom, raceId, go }) {
         err.textContent = msg;
         return;
       }
-      store.mutate(id, `Edit stint ${n}`, (x) => actEditStint(x, Date.now(), n, p));
+      if (!send('edit', { n, patch: p })) return;
       m.close();
-      tick();
       toast(`Stint ${n} updated`);
     }
 
@@ -647,8 +661,12 @@ export function MonitorView({ view, bottom, raceId, go }) {
 
   function openClockSync() {
     const c = compute(race, Date.now());
-    if (!c.started || c.finished) {
-      toast(c.finished ? 'The race is finished.' : 'Start the race first — the clock syncs once it runs.');
+    if (!['running', 'paused'].includes(race.state.status)) {
+      toast(c.started ? 'The race is finished.' : 'Start the race first — the clock syncs once it runs.');
+      return;
+    }
+    if (locked || !race.synced) {
+      send('sync'); // explains why not
       return;
     }
     let offset = 0;
@@ -656,7 +674,11 @@ export function MonitorView({ view, bottom, raceId, go }) {
       title: 'Adjust race clock',
       className: 'modal-sm',
       body: `
-        <p class="modal-text" style="margin-bottom:16px">Match the official timing screen. Nudge the clock or type the exact time left.</p>
+        <p class="modal-text" style="margin-bottom:16px">${
+          c.autoFinished
+            ? 'The race clock has reached the flag. If the official clock was stopped (red flag), type the real time left to carry on.'
+            : 'Match the official timing screen. Nudge the clock or type the exact time left.'
+        }</p>
         <div class="impact" style="margin-top:0">
           <div class="row"><span>Time elapsed</span><b data-v="el"></b></div>
           <div class="row"><span>Time left</span><b data-v="left"></b></div>
@@ -701,9 +723,8 @@ export function MonitorView({ view, bottom, raceId, go }) {
           }
           target = cc.T - left;
         }
-        store.mutate(id, 'Clock sync', (r) => actSyncClock(r, nowW, Math.min(cc.T, Math.max(0, target))));
+        if (!send('sync', { elapsed: Math.min(cc.T, Math.max(0, Math.round(target))) })) return;
         m.close();
-        tick();
         toast('Race clock adjusted');
       }
     });
@@ -721,7 +742,10 @@ export function MonitorView({ view, bottom, raceId, go }) {
       return tick();
     }
     const td = e.target.closest('td[data-f]');
-    if (td) return openEditor(+td.parentElement.dataset.n, td.dataset.f);
+    if (td) {
+      if (locked || !race.synced) return send('edit'); // explains why not
+      return openEditor(+td.parentElement.dataset.n, td.dataset.f);
+    }
     if (e.target.closest('[data-ref="time"]')) openClockSync();
   });
   bottom.addEventListener('click', (e) => {
@@ -738,6 +762,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
   return {
     destroy() {
       destroyed = true;
+      release();
       clearInterval(timer);
       unsub();
       document.removeEventListener('visibilitychange', onVisible);
