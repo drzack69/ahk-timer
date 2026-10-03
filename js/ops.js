@@ -9,7 +9,7 @@
 import {
   compute, normalizeSettings, normalizeState, validateEdit,
   actStart, actPause, actResume, actPitIn, actPitOut, actSafetyCar,
-  actFinish, actSyncClock, actEditStint, actResetStint,
+  actFinish, actSyncClock, actEditStint, actResetStint, actSetRefuel,
 } from './engine.js';
 
 const LABELS = {
@@ -25,14 +25,18 @@ const LABELS = {
   edit: 'Edit stint',
   reset: 'Reset stint',
   settings: 'Settings',
+  stopType: 'Stop type',
   undo: 'Undo',
 };
 
 export const OP_TYPES = Object.keys(LABELS);
 
 export function opLabel(op) {
+  const a = op?.args || {};
+  if (op?.type === 'pitIn' && a.refuel === false) return 'Pit in · no refuel';
+  if (op?.type === 'stopType') return `${a.refuel === false ? 'No refuel' : 'Refuel'} at stop ${a.n ?? ''}`.trim();
   const base = LABELS[op?.type] ?? 'Change';
-  return (op.type === 'edit' || op.type === 'reset') && op.args?.n ? `${base} ${op.args.n}` : base;
+  return (op.type === 'edit' || op.type === 'reset') && a.n ? `${base} ${a.n}` : base;
 }
 
 const byTime = (a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -63,7 +67,7 @@ export function applyOp(race, op) {
       actResume(race, at);
       break;
     case 'pitIn':
-      actPitIn(race, at);
+      actPitIn(race, at, { refuel: a.refuel !== false });
       break;
     case 'pitOut':
       actPitOut(race, at);
@@ -90,6 +94,9 @@ export function applyOp(race, op) {
     }
     case 'reset':
       actResetStint(race, Number(a.n));
+      break;
+    case 'stopType':
+      actSetRefuel(race, Number(a.n), a.refuel !== false);
       break;
     case 'settings':
       race.settings = normalizeSettings(a.settings);

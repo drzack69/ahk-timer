@@ -82,6 +82,7 @@ export function normalizeState(raw) {
       end: finite(a.end),
       driver: Number.isInteger(a.driver) && a.driver >= 0 ? a.driver : 0,
       planDur: finite(a.planDur),
+      ...(a.noRefuel === true ? { noRefuel: true } : {}),
     }));
   const plan = s.plan && typeof s.plan === 'object' ? s.plan : {};
   for (const [key, v] of Object.entries(plan)) {
@@ -190,13 +191,15 @@ export function compute(race, nowWall = Date.now()) {
   const rows = [];
   let prevDriver = -1;
   const rotate = () => (prevDriver + 1) % D;
+  // Range left in the tank when the previous stop added no fuel (null = full tank).
+  let carry = null;
 
   // 1) stints that actually started
   st.stints.forEach((a, i) => {
     const n = i + 1;
     const active = a.end == null && !finished;
     const sc = overlap(st.sc, a.start, a.end ?? now, now);
-    const cap = S + sc * (1 - k);
+    const cap = (carry ?? S) + sc * (1 - k);
     let end;
     let plannedDur = null;
     let plannedEnd = null;
@@ -214,7 +217,8 @@ export function compute(race, nowWall = Date.now()) {
       end = T;
       isFinal = true;
     }
-    const driver = Number.isInteger(a.driver) ? a.driver : rotate();
+    const noRefuel = !active && a.end != null && a.noRefuel === true;
+    const driver = Number.isInteger(a.driver) ? a.driver : carry != null && prevDriver >= 0 ? prevDriver : rotate();
     rows.push({
       n,
       status: active ? 'active' : 'done',
@@ -229,9 +233,11 @@ export function compute(race, nowWall = Date.now()) {
       pitBefore: i === 0 ? 0 : a.start - st.stints[i - 1].end,
       driver,
       isFinal,
+      noRefuel,
       overridden: active && ov(n).dur != null,
     });
     prevDriver = driver;
+    carry = noRefuel ? Math.max(0, cap - (end - a.start)) : null;
   });
 
   const last = st.stints[st.stints.length - 1];
@@ -252,37 +258,44 @@ export function compute(race, nowWall = Date.now()) {
       if (guard > 0) t = prev.end + (ov(n).pit ?? P);
       const o = ov(n);
       const start = Math.min(t, T);
-      const plannedDur = o.dur != null ? Math.max(60, o.dur) : S;
+      const capP = carry ?? S; // after a stop without fuel, only what's left in the tank
+      const plannedDur = o.dur != null ? Math.max(60, o.dur) : Math.max(60, capP);
       let end = start + plannedDur;
       let isFinal = false;
       if (end >= T) {
         end = T;
         isFinal = true;
       }
-      const driver = Number.isInteger(o.driver) && o.driver < D ? o.driver : rotate();
+      // The same driver usually carries on after a repair stop.
+      const sameDriver = carry != null && prevDriver >= 0;
+      const driver = Number.isInteger(o.driver) && o.driver < D ? o.driver : sameDriver ? prevDriver : rotate();
       rows.push({
         n,
         status: 'planned',
         start,
         end,
         dur: end - start,
-        cap: S,
+        cap: capP,
         sc: 0,
         plannedDur,
         planDurAtStart: null,
         pitBefore: prev ? start - prev.end : 0,
         driver,
         isFinal,
+        noRefuel: false,
         overridden: o.dur != null,
       });
       prevDriver = driver;
+      carry = null; // planned stops always refuel
       if (isFinal) break;
     }
   }
   if (finished && rows.length) rows[rows.length - 1].isFinal = true;
 
   // 3) buffer: unused range of the final stint, and per row the buffer left
-  //    after that stint = final slack + slack of the stints between it and the end
+  //    after that stint = final slack + slack of the stints between it and the end.
+  //    Range left at a stop without refuel carries on, so it isn't counted as used.
+  const slackOf = (r) => (r.noRefuel ? 0 : r.cap - r.dur);
   const N = rows.length;
   let finalSlack = 0;
   let initialBuffer = 0;
@@ -293,9 +306,9 @@ export function compute(race, nowWall = Date.now()) {
     f.bufferUsed = null;
     let acc = finalSlack;
     for (let i = N - 2; i >= 0; i--) {
-      if (i + 1 <= N - 2) acc += rows[i + 1].cap - rows[i + 1].dur;
+      if (i + 1 <= N - 2) acc += slackOf(rows[i + 1]);
       rows[i].bufferAfter = acc;
-      rows[i].bufferUsed = rows[i].cap - rows[i].dur;
+      rows[i].bufferUsed = slackOf(rows[i]);
     }
     initialBuffer = N >= 2 ? acc + rows[0].bufferUsed : finalSlack;
   }
@@ -327,7 +340,9 @@ export function compute(race, nowWall = Date.now()) {
       const byBuffer = pitIn - finalSlack;
       const byRule = cur.start + (cur.n === 1 ? open1 : 0);
       pitOpen = Math.min(pitIn, Math.max(byBuffer, byRule));
-      pitOpenBy = byBuffer >= byRule ? 'buffer' : 'rule';
+      // Why the window opens when it does: the stint-1 rule, the buffer, or
+      // 'any' when the buffer covers the whole stint.
+      pitOpenBy = byRule > byBuffer && byRule > cur.start ? 'rule' : byBuffer > cur.start ? 'buffer' : 'any';
     }
   }
 
@@ -408,12 +423,23 @@ export function actResume(race, nowWall) {
   st.status = 'running';
 }
 
-export function actPitIn(race, nowWall) {
+/** End the stint on track. `refuel: false` is a stop without fuel (repair, penalty). */
+export function actPitIn(race, nowWall, { refuel = true } = {}) {
   if (!live(race.state)) return;
   const now = raceNow(race, nowWall);
   const a = race.state.stints[race.state.stints.length - 1];
   if (!a || a.end != null) return;
   a.end = Math.max(a.start, now);
+  if (refuel) delete a.noRefuel;
+  else a.noRefuel = true;
+}
+
+/** Mark the stop after stint `n` as a refuel (full tank) or a stop without fuel. */
+export function actSetRefuel(race, n, refuel) {
+  const a = race.state.stints[n - 1];
+  if (!a || a.end == null) return;
+  if (refuel) delete a.noRefuel;
+  else a.noRefuel = true;
 }
 
 export function actPitOut(race, nowWall) {
@@ -554,7 +580,7 @@ export function raceStats(race) {
     .map((r) => (r.status === 'active' ? { ...r, dur: Math.max(0, c.now - r.start) } : r));
   const pits = [];
   for (let i = 1; i < st.stints.length; i++) {
-    pits.push({ after: i, dur: st.stints[i].start - st.stints[i - 1].end, planned: P });
+    pits.push({ after: i, dur: st.stints[i].start - st.stints[i - 1].end, planned: P, refuel: !st.stints[i - 1].noRefuel });
   }
   const drivers = set.driverNames.map((name, i) => ({ i, name, time: 0, stints: 0, longest: 0 }));
   for (const r of done) {
@@ -564,16 +590,20 @@ export function raceStats(race) {
     d.longest = Math.max(d.longest, r.dur);
   }
   const pitTotal = pits.reduce((s, p) => s + p.dur, 0);
+  // Planned pit time is for refuel stops, so the averages compare those only.
+  const refuels = pits.filter((p) => p.refuel).map((p) => p.dur);
   return {
     settings: set,
     c,
     stints: done,
     pits,
+    refuelStops: refuels.length,
+    otherStops: pits.length - refuels.length,
     drivers: drivers.filter(Boolean),
     driveTotal: done.reduce((s, r) => s + r.dur, 0),
     pitTotal,
-    pitAvg: pits.length ? pitTotal / pits.length : 0,
-    pitMin: pits.length ? Math.min(...pits.map((p) => p.dur)) : 0,
+    pitAvg: refuels.length ? refuels.reduce((s, d) => s + d, 0) / refuels.length : 0,
+    pitMin: refuels.length ? Math.min(...refuels) : 0,
     pitMax: pits.length ? Math.max(...pits.map((p) => p.dur)) : 0,
     scTotal: c.scTotal,
     scCount: st.sc.length,

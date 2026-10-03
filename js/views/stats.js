@@ -56,7 +56,7 @@ function columnChart({ items, ref, refLabel, height = 230 }) {
       const showLabel = items.length <= 14;
       return `<g class="mark" data-tip="${esc(it.tip)}">
         <rect class="hit" x="${padL + band * i}" y="${padT}" width="${band}" height="${H - padT - padB}"/>
-        <path class="bar" d="${barPath(cx - bw / 2, top0, bw, h)}"/>
+        <path class="bar${it.alt ? ' alt' : ''}" d="${barPath(cx - bw / 2, top0, bw, h)}"/>
         ${plan}
         ${showLabel ? `<text x="${cx}" y="${H - 8}" text-anchor="middle">${esc(it.label)}</text>` : ''}
       </g>`;
@@ -103,7 +103,15 @@ export function StatsView({ view, bottom, raceId, go }) {
     const kpis = [
       ['Race time', hms(c.now), race.state.status === 'finished' ? `of ${hoursLabel(s.settings.raceLengthMin)}` : 'so far'],
       ['Stints', String(s.stints.length), `${s.baseline.stintCount} planned before start`],
-      ['Pit stops', String(s.pits.length), s.pits.length ? `avg ${mins(s.pitAvg)} · best ${mins(s.pitMin)}` : '—'],
+      [
+        'Pit stops',
+        String(s.pits.length),
+        s.otherStops
+          ? `${s.refuelStops} refuel · ${s.otherStops} without fuel`
+          : s.pits.length
+            ? `avg ${mins(s.pitAvg)} · best ${mins(s.pitMin)}`
+            : '—',
+      ],
       ['Time in pits', mins(s.pitTotal), `planned ≈${mins(s.settings.pitStopMin * 60)} per stop`],
       ['Safety car', mins(s.scTotal), `${s.scCount} period${s.scCount === 1 ? '' : 's'}`],
       ['Buffer', `${mins(s.baseline.finalSlack)} → ${mins(c.finalSlack)}`, 'planned → unused at the flag'],
@@ -115,7 +123,12 @@ export function StatsView({ view, bottom, raceId, go }) {
       plan: r.planDurAtStart,
       tip: `Stint ${r.n} · ${name(r.driver)} · ${mins(r.dur)}${r.planDurAtStart ? ` (planned ${mins(r.planDurAtStart)})` : ''}`,
     }));
-    const pitItems = s.pits.map((p) => ({ label: `P${p.after}`, value: p.dur, tip: `Pit stop ${p.after} · ${mins(p.dur)}` }));
+    const pitItems = s.pits.map((p) => ({
+      label: `P${p.after}`,
+      value: p.dur,
+      alt: !p.refuel,
+      tip: `Pit stop ${p.after}${p.refuel ? '' : ' (no refuel)'} · ${mins(p.dur)}`,
+    }));
 
     const log = s.stints
       .map((r, i) => {
@@ -130,7 +143,7 @@ export function StatsView({ view, bottom, raceId, go }) {
           <td class="r">${r.planDurAtStart != null ? mins(r.planDurAtStart) : '—'}</td>
           <td class="r">${delta == null ? '—' : `${delta >= 0 ? '+' : '−'}${mins(Math.abs(delta))}`}</td>
           <td class="r">${r.sc > 1 ? mins(r.sc) : '—'}</td>
-          <td class="r">${pit ? mins(pit.dur) : '—'}</td>
+          <td class="r">${pit ? `${mins(pit.dur)}${pit.refuel ? '' : ' · no refuel'}` : '—'}</td>
         </tr>`;
       })
       .join('');
@@ -159,7 +172,8 @@ export function StatsView({ view, bottom, raceId, go }) {
             ${columnChart({ items: stintItems, ref: s.settings.maxStintMin * 60, refLabel: `Max ${s.settings.maxStintMin}′` })}
           </section>
           <section class="panel chart-card">
-            <div class="chart-head"><div><h3>Pit stops</h3><p class="sub">Time from pit in to pit out</p></div></div>
+            <div class="chart-head"><div><h3>Pit stops</h3><p class="sub">Time from pit in to pit out</p></div>
+              ${s.otherStops ? '<div class="legend"><span><i class="sw"></i>Refuel</span><span><i class="sw alt"></i>No refuel</span></div>' : ''}</div>
             ${columnChart({ items: pitItems, ref: s.settings.pitStopMin * 60, refLabel: `Planned ${mins(s.settings.pitStopMin * 60)}` })}
           </section>
           <section class="panel chart-card">
@@ -173,7 +187,7 @@ export function StatsView({ view, bottom, raceId, go }) {
               <div class="row"><span>Average stint</span><b>${s.stints.length ? mins(s.driveTotal / s.stints.length) : '—'}</b></div>
               <div class="row"><span>Longest stint</span><b>${s.stints.length ? mins(Math.max(...s.stints.map((r) => r.dur))) : '—'}</b></div>
               <div class="row"><span>Slowest pit stop</span><b>${s.pits.length ? mins(s.pitMax) : '—'}</b></div>
-              <div class="row"><span>Stops vs plan</span><b>${s.pits.length} / ${Math.max(0, s.baseline.stintCount - 1)}</b></div>
+              <div class="row"><span>Refuel stops vs plan</span><b>${s.refuelStops} / ${Math.max(0, s.baseline.stintCount - 1)}</b></div>
               <div class="row"><span>Safety-car range gained</span><b>${mins(s.scTotal * (1 - s.settings.scFactor))}</b></div>
             </div>
           </section>

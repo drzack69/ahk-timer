@@ -4,8 +4,9 @@
 import {
   compute, previewPlan, newState, raceNow, wallAt, raceAt,
   actStart, actPause, actResume, actPitIn, actPitOut, actSafetyCar, actFinish,
-  actSyncClock, actEditStint, actResetStint, validateEdit, raceStats, normalizeState,
+  actSyncClock, actEditStint, actResetStint, actSetRefuel, validateEdit, raceStats, normalizeState,
 } from '../js/engine.js';
+import { replay, opLabel } from '../js/ops.js';
 
 const out = typeof print === 'function' ? print : (s) => console.log(s);
 let passed = 0;
@@ -319,6 +320,84 @@ test('malformed state is normalised instead of breaking compute', () => {
   eq(st2.stints.length, 1, 'started race gets stint 1');
   eq(st2.plan, { 2: { pit: 60 } });
   compute({ settings: SIX_HOURS, state: st2 }, Date.now());
+});
+
+test('a stop without refuel carries the fuel left into the next stint', () => {
+  const race = newRace();
+  actStart(race, at(0));
+  actPitIn(race, at(105));
+  actPitOut(race, at(110));
+  actPitIn(race, at(168), { refuel: false }); // repair 58′ into stint 2
+  actPitOut(race, at(172));
+  const c = compute(race, at(173));
+  eq(spans(c), [[0, 105], [110, 168], [172, 219], [224, 329], [334, 360]]);
+  eq(c.rows[2].cap / M, 47, 'only the fuel left');
+  eq(c.rows[1].noRefuel, true);
+  eq(c.rows[1].bufferUsed, 0, 'carried fuel is not used buffer');
+  eq(c.finalSlack / M, 79, 'buffer grows by the 4′ stop');
+  eq(c.rows[2].driver, c.rows[1].driver, 'same driver carries on');
+  eq(c.rows[3].driver, (c.rows[2].driver + 1) % 3, 'rotation resumes after the next refuel');
+  eq(c.pitIn / M, 219);
+});
+
+test('while in the pit the plan already uses the fuel left, and the stop type can be switched', () => {
+  const race = newRace();
+  actStart(race, at(0));
+  actPitIn(race, at(60), { refuel: false });
+  let c = compute(race, at(62));
+  eq([c.next.cap / M, c.next.driver], [45, 0]);
+  actSetRefuel(race, 1, true);
+  c = compute(race, at(62));
+  eq([c.next.cap / M, c.next.driver], [105, 1]);
+  eq(race.state.stints[0].noRefuel, undefined);
+});
+
+test('safety car range adds to the fuel carried over', () => {
+  const race = newRace();
+  actStart(race, at(0));
+  actPitIn(race, at(60), { refuel: false });
+  actPitOut(race, at(62));
+  actSafetyCar(race, at(70), true);
+  actSafetyCar(race, at(80), false);
+  const c = compute(race, at(81));
+  eq(c.rows[1].cap / M, 50, '45 left + 10 SC minutes × 0.5');
+});
+
+test('stats keep stops without refuel apart', () => {
+  const race = newRace();
+  actStart(race, at(0));
+  actPitIn(race, at(50), { refuel: false });
+  actPitOut(race, at(53));
+  actPitIn(race, at(100));
+  actPitOut(race, at(106));
+  actFinish(race, at(120));
+  const s = raceStats(race);
+  eq([s.refuelStops, s.otherStops], [1, 1]);
+  eq(s.pits.map((p) => p.refuel), [false, true]);
+  near(s.pitAvg / M, 6, 'average of refuel stops only');
+});
+
+test('pit-in events carry the stop type through replay', () => {
+  const ops = [
+    { id: 'a', type: 'start', at: at(0), args: {} },
+    { id: 'b', type: 'pitIn', at: at(40), args: { refuel: false } },
+    { id: 'c', type: 'stopType', at: at(41), args: { n: 1, refuel: true } },
+  ];
+  const r = replay({ settings: SIX_HOURS, state: { status: 'draft' } }, ops);
+  eq(r.state.stints[0].noRefuel, undefined, 'switched back to refuel');
+  eq(replay({ settings: SIX_HOURS, state: { status: 'draft' } }, ops.slice(0, 2)).state.stints[0].noRefuel, true);
+  eq([opLabel(ops[1]), opLabel(ops[2])], ['Pit in · no refuel', 'Refuel at stop 1']);
+});
+
+test('pit window reason: rule, buffer, or any time', () => {
+  eq(previewPlan({ ...SIX_HOURS, pitStopMin: 0 }).pitOpenBy, 'buffer');
+  eq(previewPlan({ ...SIX_HOURS, pitOpenFirstMin: 60 }).pitOpenBy, 'rule');
+  const race = newRace();
+  actStart(race, at(0));
+  actPitIn(race, at(105));
+  actPitOut(race, at(110));
+  actEditStint(race, at(110), 2, { dur: 20 * M }); // 20′ stint, buffer > stint
+  eq(compute(race, at(111)).pitOpenBy, 'any');
 });
 
 out(`\n${passed} passed, ${failures.length} failed`);

@@ -2,7 +2,7 @@
 // the editable stint sheet, undo, pause and clock sync.
 
 import * as store from '../store.js';
-import { compute, wallAt, raceAt, actEditStint, validateEdit } from '../engine.js';
+import { compute, wallAt, raceAt, actEditStint, actSetRefuel, validateEdit } from '../engine.js';
 import { icon } from '../icons.js';
 import { esc, digits, setHTML, setText, openModal, confirmDialog, toast } from '../ui.js';
 import { hms, mmss, countdown, mins, clock, raceRel, parseDuration, parseTimeOfDay, parseHms } from '../format.js';
@@ -46,9 +46,11 @@ export function MonitorView({ view, bottom, raceId, go }) {
       </section>
 
       <section class="m-actions">
-        <button class="act" data-act="pitin" data-ref="aIn">${icon('pitIn')}<div><div class="t">PIT IN</div><div class="s" data-ref="aInS"></div></div></button>
-        <button class="act" data-act="sc" data-ref="aSc">${icon('car')}<div><div class="t">SAFETY CAR</div><div class="s" data-ref="aScS"></div></div></button>
-        <button class="act" data-act="pitout" data-ref="aOut">${icon('pitOut')}<div><div class="t">PIT OUT</div><div class="s" data-ref="aOutS"></div></div></button>
+        <button class="act a-in" data-act="pitin" data-ref="aIn">${icon('pitIn')}<div><div class="t">PIT IN</div><div class="s" data-ref="aInS"></div></div></button>
+        <button class="act act-mini a-nofuel" data-act="pitinNoRefuel" data-ref="aNoFuel"
+          title="Stop without refuelling (repair, penalty) — the next stint keeps the fuel left">${icon('wrench')}<span class="t"><span class="long">PIT IN · </span>no refuel</span></button>
+        <button class="act a-sc" data-act="sc" data-ref="aSc">${icon('car')}<div><div class="t">SAFETY CAR</div><div class="s" data-ref="aScS"></div></div></button>
+        <button class="act a-out" data-act="pitout" data-ref="aOut">${icon('pitOut')}<div><div class="t">PIT OUT</div><div class="s" data-ref="aOutS"></div></div></button>
       </section>
 
       <section class="panel m-sheet">
@@ -128,6 +130,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
     if (r.status === 'active' && c.now > r.start + r.cap) durTags.push('<span class="tag crit">OVER</span>');
     if (r.overridden) durTags.push(`<span class="tag pin" title="Duration set manually">${icon('edit')}</span>`);
     if (r.isFinal && r.status !== 'done') durTags.push('<span class="tag fin" title="Runs to the flag">FINAL</span>');
+    if (r.noRefuel) durTags.push(`<span class="tag nofuel" title="Stopped without refuelling — the next stint kept the fuel left">${icon('wrench')}NO REFUEL</span>`);
     let bufTag = '';
     const used = r.bufferUsed;
     if (used != null && Math.abs(used) >= 30 && (r.status === 'done' || r.overridden)) {
@@ -207,7 +210,11 @@ export function MonitorView({ view, bottom, raceId, go }) {
               : `<span class="chip crit">Box now</span><span class="cd">${countdown(toIn)}</span>`,
         ];
         const toOpen = c.pitOpen - c.now;
-        const why = c.pitOpenBy === 'rule' ? 'Pit-open rule for stint 1' : 'Earliest stop without adding one';
+        const why = {
+          rule: 'Pit-open rule for stint 1',
+          buffer: 'Earliest stop without adding one',
+          any: 'Any time — the buffer covers this stint',
+        }[c.pitOpenBy];
         p2 = [
           'Pit open',
           t(c.pitOpen),
@@ -220,12 +227,18 @@ export function MonitorView({ view, bottom, raceId, go }) {
       }
     } else if (c.phase === 'pit') {
       const nx = c.next;
+      const off = !race.synced || locked ? ' disabled' : '';
       head = `<span class="lbl">In pit</span><span class="no">after #${cur.n}</span>
-        ${nx ? `<span class="driver">${icon('wheel')}next: ${esc(driverName(c, nx.driver))}</span>` : ''}`;
+        ${nx ? `<span class="driver">${icon('wheel')}next: ${esc(driverName(c, nx.driver))}</span>` : ''}
+        <span class="seg stop-seg" role="group" aria-label="Stop type">
+          <button data-act="refuelOn" class="${cur.noRefuel ? '' : 'on'}"${off}>${icon('fuel')}Refuel</button>
+          <button data-act="refuelOff" class="nofuel${cur.noRefuel ? ' on' : ''}"${off}>${icon('wrench')}No refuel</button>
+        </span>`;
       big = digits(hms(c.pitElapsed));
       fuel = fuelBar(0, Math.max(c.P, c.pitElapsed, 1), c.pitElapsed, null, c.P, c.pitElapsed > c.P);
-      meta = `<span>Planned stop <b>${mins(c.P)}</b></span>
+      meta = `${cur.noRefuel ? '<span>Stop without refuel</span>' : `<span>Planned stop <b>${mins(c.P)}</b></span>`}
         <span>Stint #${cur.n} <b>${mins(cur.dur)}</b></span>
+        ${nx ? `<span>Next stint range <b>${mins(nx.cap)}</b></span>` : ''}
         <span>Buffer <b>${mins(c.finalSlack)}</b></span>`;
       const left = c.P - c.pitElapsed;
       p1 = [
@@ -262,6 +275,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
     const onTrack = c.phase === 'stint';
     const finalStint = onTrack && cur?.isFinal;
     ref.aIn.disabled = !onTrack || !canAct;
+    ref.aNoFuel.disabled = !onTrack || !canAct;
     ref.aIn.classList.toggle('ready', onTrack && !finalStint && canAct);
     ref.aIn.classList.toggle('urgent', onTrack && !finalStint && canAct && c.pitIn != null && c.now >= c.pitIn - 60);
     setText(ref.aInS, !onTrack ? (c.phase === 'pit' ? 'Car in the pit' : 'Ends the stint')
@@ -374,7 +388,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
 
   function doAction(act) {
     const nowWall = Date.now();
-    if (['primary', 'pitin', 'pitout', 'sc', 'pause'].includes(act)) {
+    if (['primary', 'pitin', 'pitinNoRefuel', 'pitout', 'sc', 'pause', 'refuelOn', 'refuelOff'].includes(act)) {
       if (nowWall - (lastAct[act] || 0) < 700) return; // accidental double tap
       lastAct[act] = nowWall;
     }
@@ -385,6 +399,21 @@ export function MonitorView({ view, bottom, raceId, go }) {
         const row = compute(store.get(id), Date.now()).rows[c.cur.n - 1];
         const used = row.bufferUsed;
         toast(`Pit in · stint ${row.n}: ${mins(row.dur)}${used > 30 ? ` · used ${mins(used)} buffer` : ''}`);
+        return;
+      }
+      case 'pitinNoRefuel': {
+        if (c.phase !== 'stint' || !send('pitIn', { refuel: false })) return;
+        const nx = compute(store.get(id), Date.now()).next;
+        toast(`Pit in · no refuel${nx ? ` · next stint keeps ${mins(nx.cap)} of fuel` : ''}`);
+        return;
+      }
+      case 'refuelOn':
+      case 'refuelOff': {
+        if (c.phase !== 'pit') return;
+        const refuel = act === 'refuelOn';
+        if (refuel === !c.cur.noRefuel || !send('stopType', { n: c.cur.n, refuel })) return;
+        const nx = compute(store.get(id), Date.now()).next;
+        toast(refuel ? 'Refuel stop — next stint gets a full tank' : `No refuel — next stint keeps ${mins(nx?.cap ?? 0)} of fuel`);
         return;
       }
       case 'pitout': {
@@ -452,7 +481,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
     const showUsed = kind !== 'done' && !r.isFinal;
     const t = (sec) => fmtT(c, sec, nowWall);
     const timeHint = useClock(c) ? 'HH:MM' : 'race time h:mm';
-    const d = { start: r.start, dur: r.dur, pit: r.pitBefore, driver: r.driver, auto: false };
+    const d = { start: r.start, dur: r.dur, pit: r.pitBefore, driver: r.driver, auto: false, refuel: !r.noRefuel };
     const touched = new Set();
 
     const durHint = kind === 'done' ? 'Actual stint time' : r.isFinal ? 'Runs to the flag — shorter adds a stop' : `Range ${mins(r.cap)}`;
@@ -464,6 +493,15 @@ export function MonitorView({ view, bottom, raceId, go }) {
             .map((nm, i) => `<button type="button" data-driver="${i}" class="${i === d.driver ? 'on' : ''}">${esc(nm)}</button>`)
             .join('')}</div>
         </div>
+        ${
+          kind === 'done'
+            ? `<div class="field full"><span class="field-label">Stop after this stint</span>
+                <div class="drivers-pick">
+                  <button type="button" data-refuel="1" class="${d.refuel ? 'on' : ''}">${icon('fuel')} Refuel · full tank</button>
+                  <button type="button" data-refuel="0" class="${d.refuel ? '' : 'on'}">${icon('wrench')} No refuel</button>
+                </div></div>`
+            : ''
+        }
         <label class="field"><span class="field-label">Start</span>
           <input class="input" data-in="start" value="${t(r.start)}" ${canStart ? '' : 'disabled'} inputmode="numeric" autocomplete="off">
           <span class="hint">${canStart ? (kind === 'planned' ? `${timeHint} · moves the pit stop before` : `${timeHint} · actual pit-out`) : 'Race start'}</span></label>
@@ -533,6 +571,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
       if (except !== 'end') inp('end').value = t(d.start + d.dur);
       if (except !== 'used' && inp('used')) inp('used').value = mmss(Math.max(0, r.cap - d.dur));
       for (const b of el.querySelectorAll('[data-driver]')) b.classList.toggle('on', +b.dataset.driver === d.driver);
+      for (const b of el.querySelectorAll('[data-refuel]')) b.classList.toggle('on', (b.dataset.refuel === '1') === d.refuel);
       impact();
     }
 
@@ -547,6 +586,7 @@ export function MonitorView({ view, bottom, raceId, go }) {
       }
       const trial = clone(race);
       actEditStint(trial, Date.now(), n, p);
+      if (touched.has('refuel')) actSetRefuel(trial, n, d.refuel);
       const c2 = compute(trial, Date.now());
       const extra = c2.stintCount - c.stintCount;
       box.innerHTML = `
@@ -602,6 +642,13 @@ export function MonitorView({ view, bottom, raceId, go }) {
     });
 
     el.addEventListener('click', (e) => {
+      const rf = e.target.closest('[data-refuel]');
+      if (rf) {
+        d.refuel = rf.dataset.refuel === '1';
+        touched.add('refuel');
+        sync();
+        return;
+      }
       const drv = e.target.closest('[data-driver]');
       if (drv) {
         d.driver = +drv.dataset.driver;
@@ -635,13 +682,15 @@ export function MonitorView({ view, bottom, raceId, go }) {
 
     function apply() {
       const p = patch();
-      if (!Object.keys(p).length) return m.close();
+      const stopChanged = d.refuel !== !r.noRefuel;
+      if (!Object.keys(p).length && !stopChanged) return m.close();
       const msg = validateEdit(race, Date.now(), n, p);
       if (msg) {
         err.textContent = msg;
         return;
       }
-      if (!send('edit', { n, patch: p })) return;
+      if (stopChanged && !send('stopType', { n, refuel: d.refuel })) return;
+      if (Object.keys(p).length && !send('edit', { n, patch: p })) return;
       m.close();
       toast(`Stint ${n} updated`);
     }

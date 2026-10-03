@@ -94,6 +94,7 @@ the buffer is 75′. Set the pit stop to 0 and you'll see 60′.
 1. **START** at the green flag. Every timer is calculated from timestamps, so reloading the page, locking the tablet or switching tabs never loses time.
 2. **PIT IN** when the car enters the pit lane. This closes the stint and updates the buffer.
 3. **PIT OUT** when it leaves. The next stint starts and every upcoming time adjusts.
+   - **PIT IN · no refuel** (the smaller grey button) is for stops without fuel, such as a repair or a stop-and-go penalty. The next stint keeps the fuel that was left, plus any safety-car range, and the same driver carries on. A stop like this uses no buffer: the plan shifts by the stop's length, and the buffer grows by the same amount. While the car is in the pit you can still switch the stop between *Refuel* and *No refuel*. Afterwards, change it in the stint editor.
 4. **SAFETY CAR** toggles the SC period on and off.
 5. Tap any cell of the stint sheet to edit it: driver, start (moves the pit stop before it), duration, end, or buffer used. The dialog previews the effect before you apply it.
 6. Tap the time bar to **sync the race clock** with the official timing screen.
